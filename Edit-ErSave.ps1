@@ -48,7 +48,7 @@ param(
     # --- where to start. Both optional here: the REPL can ask. ---
     [string]$Character,
     [int[]]$Slot,
-    [int]$PageSize = 20
+    [ValidateRange(1, 200)][int]$PageSize = 20
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\ERSaveLib.ps1"
@@ -487,6 +487,7 @@ $menu = @(
     [pscustomobject]@{ Key = 'goods';  Text = 'Goods - set stack quantity (key items and upgrade materials included)' }
     [pscustomobject]@{ Key = 'runes';  Text = 'Runes - set the count carried in hand' }
     [pscustomobject]@{ Key = 'char';   Text = 'Change character' }
+    [pscustomobject]@{ Key = 'quit';   Text = 'Quit' }
 )
 
 while ($true) {
@@ -511,10 +512,14 @@ while ($true) {
     $pick = Select-ErOption -Prompt 'What would you like to change?' -Options $menu -AllowEscape `
                 -Label { param($m) $m.Text }
 
+    # Esc could be an accident, so it asks; picking Quit from the menu is deliberate and
+    # is not second-guessed. Handled before the switch: break inside a switch statement
+    # leaves the switch, not the loop.
     if ($null -eq $pick) {
         if (Read-ErYesNo -Question "`nQuit?") { break }
         continue
     }
+    if ($pick.Key -eq 'quit') { break }
 
     switch ($pick.Key) {
         'weapon' { Invoke-ErWeaponAction -Session $session -Bytes $bytes -State $state -Prof $prof -Vanilla $vanilla -PageSize $PageSize }

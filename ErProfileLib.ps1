@@ -662,7 +662,7 @@ function Resolve-ErSession {
     if ($Path) {
         $savePath = $Path
     }
-    elseif ($Save -and ($Save -match '[\/]' -or [IO.Path]::IsPathRooted($Save))) {
+    elseif ($Save -and ($Save -match '[\\/]' -or [IO.Path]::IsPathRooted($Save))) {
         $savePath = $Save
     }
     else {

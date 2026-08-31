@@ -62,74 +62,89 @@ $session = Resolve-ErSession -Path $Path -SaveFolder $SaveFolder -Save $Save `
 
 $bytes   = [IO.File]::ReadAllBytes($session.SavePath)
 $prof    = $session.Profile
-$goods   = Get-ErNameTable -Family Goods  -Profile $prof
-$wname   = Get-ErNameTable -Family Weapon -Profile $prof
+$goods   = Get-ErNameTable -Family Goods -Profile $prof
 $vanilla = if ($BaseGame) { Get-ErProfile -Profile vanilla } else { $null }
 
-$char  = @(Resolve-ErCharacters -Bytes $bytes -Character $Character -Slot $Slot)[0]
-$entry = $char.Entry
-Write-Host ("SLOT     {0} '{1}'  checksum {2}" -f $char.Index, $char.Name,
-    $(if (Test-ErChecksum -Bytes $bytes -Entry $entry) { 'OK' } else { 'BAD' }))
-
-$arrays = @(Find-ErInventories -Bytes $bytes -Entry $entry)
-if (-not $arrays.Count) { throw "No item array found in slot $($char.Index)" }
-
-# The -BaseGame startup gate. Per-item refusal below still guards each individual write;
-# this is here so a run that could achieve almost nothing says so before doing the work.
-if ($vanilla -and -not (Test-ErBaseGameSafe -Bytes $bytes -Char $char -Vanilla $vanilla -Inventories $arrays)) {
-    throw "Refusing to run under -BaseGame on '$($char.Name)' - see the list above."
-}
+$targets = @(Resolve-ErCharacters -Bytes $bytes -Character $Character -Slot $Slot)
 
 $plan    = New-Object Collections.ArrayList
 $refused = 0
 
-if (-not $SkipWeapons) {
-    $gaIndex = Get-ErGaItemIndex -Bytes $bytes -Entry $entry -Inventories $arrays
-    $equip = @(Get-ErEquipment -Bytes $bytes -Entry $entry -Inventories $arrays `
-                   -GaIndex $gaIndex -Profile $prof)
-    foreach ($w in ($equip | Where-Object { $_.Kind -eq 'Weapon' })) {
-        if (-not $w.Upgradeable) { continue }
-        # Under -BaseGame the weapon itself has to be a base-game weapon, or the record
-        # cannot survive the mod being removed regardless of what level it carries. This
-        # is reported separately from the ceiling clamp below so a refusal is visible.
-        if ($vanilla -and -not (Test-ErItemExists -Profile $vanilla -Family Weapon -Id $w.BaseId)) {
-            Write-Host ("  SKIP  {0} (id {1}) is not a base-game weapon - refused under -BaseGame" -f $w.Name, $w.BaseId)
-            $refused++
-            continue
-        }
-        $target = Get-ErWeaponCeiling -Profile $prof -BaseId $w.BaseId `
-                                      -Requested $MaxWeaponLevel -BaseGameProfile $vanilla
-        if ($target -le 0) { continue }
-        if ($w.Level -ge $target) { continue }
-        [void]$plan.Add([pscustomobject]@{
-            What   = 'Weapon'
-            Offset = $w.GaOffset + 4
-            Old    = [uint32]$w.ParamId
-            New    = [uint32]($w.BaseId + $target)
-            # Say so when the target is below what this build would allow, otherwise a
-            # -BaseGame or -MaxWeaponLevel run looks like it is undershooting at random.
-            Label  = ('{0}  +{1} -> +{2}{3}' -f $w.Name, $w.Level, $target,
-                      $(if ($target -lt $w.MaxLevel) { "   (clamped; $($prof.Name) allows +$($w.MaxLevel))" } else { '' }))
-        })
-    }
-}
+foreach ($char in $targets) {
+    $entry = $char.Entry
+    Write-Host ("SLOT     {0} '{1}'  checksum {2}" -f $char.Index, $char.Name,
+        $(if (Test-ErChecksum -Bytes $bytes -Entry $entry) { 'OK' } else { 'BAD' }))
 
-if (-not $SkipSpiritAshes) {
-    foreach ($a in @(Get-ErSpiritAshes -Bytes $bytes -Entry $entry -Inventories $arrays -GoodsNames $goods)) {
-        if ($null -eq $a.MaxId) { continue }
-        if ($a.Level -ge $a.MaxLevel) { continue }
-        if ($vanilla -and -not (Test-ErItemExists -Profile $vanilla -Family Goods -Id $a.MaxId)) {
-            Write-Host ("  SKIP  {0} +{1} is not a base-game id - refused under -BaseGame" -f $a.Family, $a.MaxLevel)
-            $refused++
+    $arrays = @(Find-ErInventories -Bytes $bytes -Entry $entry)
+    if (-not $arrays.Count) {
+        if ($targets.Count -gt 1) {
+            Write-Host ("  SKIP  no item array found in slot {0} - nothing planned for this character" -f $char.Index)
             continue
         }
-        [void]$plan.Add([pscustomobject]@{
-            What   = 'SpiritAsh'
-            Offset = $a.Offset
-            Old    = [uint32](2952790016 + $a.ItemId)   # 0xB0000000 | id
-            New    = [uint32](2952790016 + $a.MaxId)
-            Label  = ('{0}  +{1} -> +{2}' -f $a.Family, $a.Level, $a.MaxLevel)
-        })
+        throw "No item array found in slot $($char.Index)"
+    }
+
+    # The -BaseGame startup gate. Per-item refusal below still guards each individual
+    # write; this is here so a run that could achieve almost nothing says so before
+    # doing the work.
+    if ($vanilla -and -not (Test-ErBaseGameSafe -Bytes $bytes -Char $char -Vanilla $vanilla -Inventories $arrays)) {
+        throw "Refusing to run under -BaseGame on '$($char.Name)' - see the list above."
+    }
+
+    if (-not $SkipWeapons) {
+        $gaIndex = Get-ErGaItemIndex -Bytes $bytes -Entry $entry -Inventories $arrays
+        $equip = @(Get-ErEquipment -Bytes $bytes -Entry $entry -Inventories $arrays `
+                       -GaIndex $gaIndex -Profile $prof)
+        foreach ($w in ($equip | Where-Object { $_.Kind -eq 'Weapon' })) {
+            if (-not $w.Upgradeable) { continue }
+            # Under -BaseGame the weapon itself has to be a base-game weapon, or the
+            # record cannot survive the mod being removed regardless of what level it
+            # carries. Reported separately from the ceiling clamp so a refusal is
+            # visible.
+            if ($vanilla -and -not (Test-ErItemExists -Profile $vanilla -Family Weapon -Id $w.BaseId)) {
+                Write-Host ("  SKIP  {0} (id {1}) is not a base-game weapon - refused under -BaseGame" -f $w.Name, $w.BaseId)
+                $refused++
+                continue
+            }
+            $target = Get-ErWeaponCeiling -Profile $prof -BaseId $w.BaseId `
+                                          -Requested $MaxWeaponLevel -BaseGameProfile $vanilla
+            if ($target -le 0) { continue }
+            if ($w.Level -ge $target) { continue }
+            [void]$plan.Add([pscustomobject]@{
+                Who    = $char.Name
+                Entry  = $entry
+                What   = 'Weapon'
+                Offset = $w.GaOffset + 4
+                Old    = [uint32]$w.ParamId
+                New    = [uint32]($w.BaseId + $target)
+                # Say so when the target is below what this build would allow, otherwise
+                # a -BaseGame or -MaxWeaponLevel run looks like it is undershooting at
+                # random.
+                Label  = ('{0}  +{1} -> +{2}{3}' -f $w.Name, $w.Level, $target,
+                          $(if ($target -lt $w.MaxLevel) { "   (clamped; $($prof.Name) allows +$($w.MaxLevel))" } else { '' }))
+            })
+        }
+    }
+
+    if (-not $SkipSpiritAshes) {
+        foreach ($a in @(Get-ErSpiritAshes -Bytes $bytes -Entry $entry -Inventories $arrays -GoodsNames $goods)) {
+            if ($null -eq $a.MaxId) { continue }
+            if ($a.Level -ge $a.MaxLevel) { continue }
+            if ($vanilla -and -not (Test-ErItemExists -Profile $vanilla -Family Goods -Id $a.MaxId)) {
+                Write-Host ("  SKIP  {0} +{1} is not a base-game id - refused under -BaseGame" -f $a.Family, $a.MaxLevel)
+                $refused++
+                continue
+            }
+            [void]$plan.Add([pscustomobject]@{
+                Who    = $char.Name
+                Entry  = $entry
+                What   = 'SpiritAsh'
+                Offset = $a.Offset
+                Old    = [uint32](2952790016 + $a.ItemId)   # 0xB0000000 | id
+                New    = [uint32](2952790016 + $a.MaxId)
+                Label  = ('{0}  +{1} -> +{2}' -f $a.Family, $a.Level, $a.MaxLevel)
+            })
+        }
     }
 }
 
@@ -138,11 +153,11 @@ if (-not $plan.Count) { Write-Host "`nNothing to change - everything is already 
 
 Write-Host ("`nPLANNED CHANGES ({0})" -f $plan.Count)
 foreach ($p in $plan) {
-    Write-Host ("   {0,-10} 0x{1:x}  {2} -> {3}   {4}" -f $p.What, $p.Offset, $p.Old, $p.New, $p.Label)
+    Write-Host ("   {0,-16} {1,-10} 0x{2:x}  {3} -> {4}   {5}" -f $p.Who, $p.What, $p.Offset, $p.Old, $p.New, $p.Label)
 }
 
 if (-not $Apply) {
-    Write-Host "`nDRY RUN - nothing written. Re-run with -Apply to commit."
+    Write-Host "`n(dry run - nothing written; re-run with -Apply to write)"
     return
 }
 
@@ -156,10 +171,12 @@ $backup = "$($session.SavePath).bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
 [IO.File]::Copy($session.SavePath, $backup)
 Write-Host "`nBackup -> $backup"
 
+$touched = @{}
 foreach ($p in $plan) {
     [Array]::Copy([BitConverter]::GetBytes($p.New), 0, $bytes, $p.Offset, 4)
+    $touched[$p.Entry.Index] = $p.Entry
 }
-Update-ErChecksum -Bytes $bytes -Entry $entry
+foreach ($e in $touched.Values) { Update-ErChecksum -Bytes $bytes -Entry $e }
 [IO.File]::WriteAllBytes($session.SavePath, $bytes)
 
 $verify = [IO.File]::ReadAllBytes($session.SavePath)

@@ -29,19 +29,19 @@ You need PowerShell. This works on Windows, sorry SteamOS
 1. Put this folder anywhere **outside** `%APPDATA%\EldenRing\`
 2. Allow the scripts to run in your current PowerShell session:
 
-```bash
+```powershell
 powershell -ExecutionPolicy Bypass -NoProfile
 ```
 
 Or, for PowerShell 7 (it keeps its own execution policy, separate from 5.1):
 
-```bash
+```powershell
 pwsh -ExecutionPolicy Bypass -NoProfile
 ```
 
 3. Check the install by listing what is in your saves:
 
-```bash
+```powershell
 .\Show-ErInventory.ps1
 ```
 
@@ -51,7 +51,7 @@ It finds the save folder under `%APPDATA%\EldenRing\<steamId64>\`, asks which sa
 
 ## Choosing the save, build, and character
 
-Any of the scripts here all accept the following arguments:
+Every script here accepts the following arguments:
 
 | Argument | Meaning |
 |---|---|
@@ -79,7 +79,7 @@ The build is detected from the save extension, then from the mod's `altsaves.tom
 
 ### Look at a save
 
-```bash
+```powershell
 .\Show-ErInventory.ps1
 ```
 
@@ -87,42 +87,44 @@ Lists every character, every item array in each slot, and the consumables each c
 
 Filters: `-Character`, `-Slot`, `-NameLike`, `-ItemId`, `-GoodsOnly`.
 
-```bash
+```powershell
 .\Show-ErInventory.ps1 -Save ER0000.cnv -Character JohnEldenRing -NameLike '*Stone*' -GoodsOnly
 ```
 
 ### Look at weapons, armour and spirit ashes
 
-```bash
+```powershell
 .\Show-ErEquipment.ps1 -Save ER0000.cnv -Character JohnEldenRing
 ```
 
-This reads the GaItem table and prints each weapon with its current level and the ceiling **this build** gives the weapon (Convergence changes the weapon level upgrade system). `[not upgradeable]` means the build gives that weapon no upgrade path. Shocker. Add `-IncludeArmour` for armour, which has no can't be upgraded or edited but I was already decoding the item tables so displaying armor here wasn't a huge deal.
+This reads the GaItem table and prints each weapon with its current level and the ceiling **this build** gives the weapon (Convergence changes the weapon level upgrade system). `[not upgradeable]` means the build gives that weapon no upgrade path. Shocker. Add `-IncludeArmour` for armour. Armour has no upgrade path and can't be edited, but I was already decoding the item tables so displaying it here wasn't a huge deal.
 
 ### Change stack quantities
 
 Everything dry runs by default (it will preview changes, but won't actually modify your save file). Adding the `-Apply` flag writes the changes back to your save.
 
-```bash
+```powershell
 .\Edit-ErItemQuantity.ps1 -Save ER0000.cnv -Character Spantz -ItemId 10101,10105 -Quantity 999
 ```
 
-```bash
+```powershell
 .\Edit-ErItemQuantity.ps1 -Save ER0000.cnv -Character Spantz -ItemId 10101,10105 -Quantity 999 -Apply
 ```
 
 You can select items with `-ItemId`, `-NameLike`, or both (I guess, although that's redundant); one or the other is always required. Quantity range is 1 through 999. Only items the character already
 holds are edited, this will never add new items that your character doesn't already hold some number of.
 
+Only goods are edited: consumables, materials, key items. Weapon and armour records carry a dynamic handle instead of an item id, so `-ItemId` can't select them and they are never touched.
+
 On `-Apply` the script takes a timestamped backup next to the save, patches the save, recomputes the slot MD5, and re-verifies the edits from disk.
 
 ### Change the runes a character is carrying
 
-```bash
+```powershell
 .\Edit-ErRunes.ps1 -Save ER0000.cnv -Character Spantz -Runes 999999999
 ```
 
-```bash
+```powershell
 .\Edit-ErRunes.ps1 -Save ER0000.cnv -Character Spantz -Runes 999999999 -Apply
 ```
 
@@ -138,23 +140,23 @@ The runes live in a structure that nothing in the file points at, so it is locat
 
 ### Raise weapon and spirit-ash levels
 
-```bash
+```powershell
 .\Edit-ErUpgrade.ps1 -Save ER0000.cnv -Character Spantz
 .\Edit-ErUpgrade.ps1 -Save ER0000.cnv -Character Spantz -Apply
 ```
 
 This will upgrade all weapons / spirit ashes that your chosen character has. You don't get to choose, because I don't want to choose. I just want upgraded weapons. The level that each individual weapon gets upgraded to will be based on its normal upgrade path (somber weapons get capped at +10; regular ones go to +25; things with the Convergence mod do... something else. +15 or whatever, IDK).
 
-Options: `-MaxWeaponLevel <n>` caps the result further ("no higher than", if you want to keep your weapons at an appropriate level for your overall progression); `-SkipWeapons` and `-SkipSpiritAshes` to only upgrade weapons or only upgrade ashes.
+Options: `-MaxWeaponLevel <n>` caps the result further ("no higher than", if you want to keep your weapons at an appropriate level for your overall progression); `-SkipWeapons` and `-SkipSpiritAshes` to only upgrade weapons or only upgrade ashes. `-Slot` may select several characters; each one gets its own section in the plan.
 
 ### Interactive editor
 
-```bash
+```powershell
 .\Edit-ErSave.ps1
 .\Edit-ErSave.ps1 -Save ER0000.cnv -Character Frieren
 ```
 
-I hate PowerShell, so we got an interactive tool that lets me pretend this is written with literally any other framework. Pick a character, then weapons (set level), spirit ashes (set level), consumables (set quantity) or runes (set the count in hand). Item lists are paginated and can be filtered: Enter advances to the next page, `p` returns to the previous page, `/text` lets you apply filters, `/` clears the page, Esc goes back.
+I hate PowerShell, so we got an interactive tool that lets me pretend this is written with literally any other framework. Pick a character, then weapons (set level), spirit ashes (set level), consumables (set quantity) or runes (set the count in hand). Item lists are paginated and can be filtered: Enter advances to the next page, `p` returns to the previous page, `/text` filters the list, `/` on its own clears the filter, Esc goes back. Quit from the menu, or press Esc there.
 
 The header above the menu shows the selected character's level, runes in hand and rune memory. Raising rune memory alongside the runes is offered as its own confirmation, because every write in here is one confirmed value.
 
@@ -168,11 +170,11 @@ Options: `-PageSize` sets the list length.
 
 Run these after a game patch or a mod update. They rewrite `data/<profile>/`.
 
-```bash
+```powershell
 .\Export-ErNames.ps1 -Profile convergence
 ```
 
-```bash
+```powershell
 .\Export-ErParamData.ps1 -Profile convergence
 ```
 
@@ -188,7 +190,7 @@ Regenerate after **any** mod update. The Convergence mod renames a subset of van
 
 ## Checking an engine
 
-```bash
+```powershell
 .\Test-ErCompat.ps1
 ```
 

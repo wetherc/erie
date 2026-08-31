@@ -238,6 +238,9 @@ function Get-ErCharacters {
 
     $entries = @(Get-ErEntries -Bytes $Bytes)
     $profile = $entries | Where-Object { $_.Index -eq 10 }
+    if (-not $profile) {
+        throw 'This file has no profile summary entry (USER_DATA010), so character names cannot be read. It does not look like an Elden Ring save.'
+    }
     $nameBase = $profile.DataOffset + 16 + 0x195E   # first slot's name
     $stride   = 0x24C
 

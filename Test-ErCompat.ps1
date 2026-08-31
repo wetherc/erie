@@ -141,6 +141,71 @@ Assert-Er (([BitConverter]::ToUInt32($bnd, $hits[0] + 4)) -eq 1000) 'runes read 
 $none = @([ErPlayerScan]::Find($bnd, $ds, $de, 42, [Text.Encoding]::Unicode.GetBytes('Test')))
 Assert-Er ($none.Count -eq 0) 'prefix of the name does not match (null-terminator check)'
 
+# --- character table -------------------------------------------------------------
+
+Write-Host 'character table (Get-ErCharacters)'
+$threw = $false
+try { [void](Get-ErCharacters -Bytes $bnd) } catch { $threw = $true }
+Assert-Er $threw 'a file without USER_DATA010 is a clear error'
+
+# USER_DATA010 carries slot names at 0x195E + 0x24C per slot, level 0x22 past the name.
+$profData = New-Object byte[] 0x3000
+$nb = [Text.Encoding]::Unicode.GetBytes('Frieren')
+[Array]::Copy($nb, 0, $profData, 0x195E, $nb.Length)
+[Array]::Copy([BitConverter]::GetBytes([uint32]42), 0, $profData, 0x195E + 0x22, 4)
+# slot 1: a stale name over an all-zero payload, which must read as unoccupied
+$nb2 = [Text.Encoding]::Unicode.GetBytes('Ghost')
+[Array]::Copy($nb2, 0, $profData, 0x195E + 0x24C, $nb2.Length)
+
+$slotEntries = @(@{ Name = 'USER_DATA000'; Data = $slotData })
+for ($i = 1; $i -le 9; $i++) { $slotEntries += @{ Name = ('USER_DATA00{0}' -f $i); Data = (New-Object byte[] 256) } }
+$slotEntries += @{ Name = 'USER_DATA010'; Data = $profData }
+$bndChars = New-ErTestBnd4 -Entries $slotEntries
+$chars = @(Get-ErCharacters -Bytes $bndChars)
+Assert-Er ($chars[0].Name -eq 'Frieren' -and $chars[0].IsOccupied -and $chars[0].Level -eq 42) 'occupied slot reads name and level'
+Assert-Er (-not $chars[1].IsOccupied) 'zero payload reads as unoccupied despite a stale name'
+Assert-Er ((Resolve-ErSlot -Bytes $bndChars -Character 'fri') -eq 0) 'a unique name prefix resolves to its slot'
+$threw = $false
+try { [void](Resolve-ErSlot -Bytes $bndChars -Character 'nobody') } catch { $threw = $true }
+Assert-Er $threw 'an unknown character name is an error, not a guess'
+
+# --- profile rules ----------------------------------------------------------------
+
+Write-Host 'profile resolution (Resolve-ErProfile)'
+# -ModDir pointing nowhere keeps these hermetic: no real install can influence them.
+$noMod = Join-Path $PSScriptRoot 'no-such-dir'
+$r = Resolve-ErProfile -SavePath 'ER0000.cnv' -ModDir $noMod
+Assert-Er ($r.Profile -eq 'convergence') 'a .cnv save resolves to convergence'
+$r = Resolve-ErProfile -SavePath 'ER0000.cnv.co2' -ModDir $noMod
+Assert-Er ($r.Profile -eq 'convergence') 'a .cnv.co2 save resolves to convergence'
+$r = Resolve-ErProfile -SavePath 'ER0000.sl2' -ModDir $noMod
+Assert-Er ($r.Profile -eq 'vanilla') 'a .sl2 save with no mod install resolves to vanilla'
+$r = Resolve-ErProfile -SavePath 'ER0000.sl2' -ForceProfile convergence -ModDir $noMod
+Assert-Er ($r.Profile -eq 'convergence') '-Profile overrides detection'
+
+Write-Host 'weapon ceiling rules (Get-ErWeaponCeiling)'
+$profConv = [pscustomobject]@{ Name = 'convergence'; MaxLevel = @{ 100 = 15; 200 = 15 } }
+$profVan  = [pscustomobject]@{ Name = 'vanilla';     MaxLevel = @{ 100 = 25 } }
+Assert-Er ((Get-ErWeaponCeiling -Profile $profConv -BaseId 100) -eq 15) "the build's own ceiling applies"
+Assert-Er ((Get-ErWeaponCeiling -Profile $profConv -BaseId 999) -eq 0) 'a weapon the build does not define gets 0'
+Assert-Er ((Get-ErWeaponCeiling -Profile $profConv -BaseId 100 -Requested 10) -eq 10) '-MaxWeaponLevel lowers the ceiling'
+Assert-Er ((Get-ErWeaponCeiling -Profile $profConv -BaseId 100 -Requested 20) -eq 15) '-MaxWeaponLevel never raises it'
+Assert-Er ((Get-ErWeaponCeiling -Profile $profConv -BaseId 100 -Requested 0) -eq 0) 'a requested 0 means leave everything alone'
+Assert-Er ((Get-ErWeaponCeiling -Profile $profVan -BaseId 100 -BaseGameProfile $profConv) -eq 15) '-BaseGame clamps to the lower ceiling'
+Assert-Er ((Get-ErWeaponCeiling -Profile $profConv -BaseId 200 -BaseGameProfile $profVan) -eq 0) 'a weapon absent from vanilla clamps to 0 under -BaseGame'
+
+Write-Host 'spirit-ash ladders (Get-ErAshLadders)'
+$goodsNames = @{
+    200 = 'Lone Wolf Ashes'; 201 = 'Lone Wolf Ashes +1'; 210 = 'Lone Wolf Ashes +10'
+    300 = 'Crimson Tear Flask +3'
+    400 = 'Wandering Noble Ashes'
+}
+$ladders = Get-ErAshLadders -GoodsNames $goodsNames
+Assert-Er ($ladders.ContainsKey('Lone Wolf Ashes') -and $ladders['Lone Wolf Ashes'].Max -eq 10) 'ladder and its maximum come from the names'
+Assert-Er ($ladders['Lone Wolf Ashes'].ByLevel[10] -eq 210) 'the top level maps to its id'
+Assert-Er (-not $ladders.ContainsKey('Crimson Tear Flask')) 'flasks with +N names are not ashes'
+Assert-Er ($ladders['Wandering Noble Ashes'].Max -eq 0) 'a single-level family has maximum 0'
+
 # --- archive crypto -------------------------------------------------------------
 
 Write-Host 'RSA / DER / path hash (ErArchive)'

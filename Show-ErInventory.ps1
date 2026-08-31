@@ -59,6 +59,9 @@ Write-Host ''
 
 if ($Character) { $Slot = @(Resolve-ErSlot -Bytes $bytes -Character $Character) }
 
+# Set when a non-goods row prints, to say once at the end where those resolve to names.
+$sawEquipment = $false
+
 foreach ($c in $chars) {
     if (-not $c.IsOccupied) { continue }
     if ($null -ne $Slot -and $Slot.Count -and $c.Index -notin $Slot) { continue }
@@ -93,6 +96,7 @@ foreach ($c in $chars) {
             if ($ItemId -and $it.ItemId -notin $ItemId) { continue }
             $nm = if ($it.IsGoods -and $names.ContainsKey($it.ItemId)) { $names[$it.ItemId] } else { "<cat $($it.Category) id $($it.ItemId)>" }
             if ($NameLike -and $nm -notlike $NameLike) { continue }
+            if (-not $it.IsGoods) { $sawEquipment = $true }
             # Existence is asked of the PARAM tables, never of the names: a mod leaves
             # stale vanilla names on ids the base game never defined.
             $mark = if ($vanilla -and $it.IsGoods -and -not (Test-ErItemExists -Profile $vanilla -Family Goods -Id $it.ItemId)) { '  [mod]' } else { '' }
@@ -100,4 +104,8 @@ foreach ($c in $chars) {
         }
     }
     Write-Host ''
+}
+
+if ($sawEquipment) {
+    Write-Host 'Weapons and armour show as <cat ... id ...> here: their real ids live in the GaItem table, not the inventory record. Show-ErEquipment.ps1 resolves them to names and upgrade levels.'
 }

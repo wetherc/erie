@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Sets the stack quantity of existing inventory items for a named character.
+  Sets the stack quantity of goods a named character already holds.
 .DESCRIPTION
   Dry run by default; pass -Apply to write. On -Apply a timestamped backup is made
   next to the save first, the affected slot's MD5 is recomputed, and the result is
@@ -13,6 +13,11 @@
   ONLY edits items that already exist. It never adds records, so the element count,
   inventory_index allocation and acquisition tables are all left untouched. This is
   what makes it safe. See SAVE-FORMAT.md section 11.3 for why adding is not.
+
+  ONLY edits GOODS records. Weapons, armour, talismans and ammunition carry a dynamic
+  handle in the inventory record, and its low bits are not an item id, so an -ItemId
+  match against one of those records would be an accident, not a selection. Those
+  records are passed over without comment.
 
   With -BaseGame, an item whose id does not exist in base-game Elden Ring is refused
   rather than edited: the point of the flag is that the save stays loadable without the
@@ -58,6 +63,7 @@ Write-Host ("`nEditing: {0}" -f (($target | ForEach-Object { "'{0}' (slot {1})" 
 
 # --- patch --------------------------------------------------------------------
 $touched = @{}
+$writes  = New-Object Collections.ArrayList
 $changes = 0
 $refused = 0
 
@@ -70,14 +76,18 @@ foreach ($c in $target) {
     }
     foreach ($inv in @(Find-ErInventories -Bytes $bytes -Entry $entry)) {
         foreach ($it in Get-ErInventoryItems -Bytes $bytes -Inventory $inv) {
+            # Goods only: a non-goods record's low handle bits are a dynamic counter,
+            # not an item id, so a match there would be a coincidence and the write
+            # would land on a weapon or armour record.
+            if (-not $it.IsGoods) { continue }
             if ($ItemId -and $it.ItemId -notin $ItemId) { continue }
-            $n = if ($it.IsGoods -and $names.ContainsKey($it.ItemId)) { $names[$it.ItemId] } else { "<id $($it.ItemId)>" }
+            $n = if ($names.ContainsKey($it.ItemId)) { $names[$it.ItemId] } else { "<id $($it.ItemId)>" }
             if ($NameLike -and $n -notlike $NameLike) { continue }
 
             # Existence is asked of the param tables, never of the names: a mod leaves
             # stale vanilla names on ids the base game never defined, so a name here
             # proves nothing about whether the base game can load the record.
-            if ($vanilla -and $it.IsGoods -and -not (Test-ErItemExists -Profile $vanilla -Family Goods -Id $it.ItemId)) {
+            if ($vanilla -and -not (Test-ErItemExists -Profile $vanilla -Family Goods -Id $it.ItemId)) {
                 Write-Host ("  SKIP  {0}: {1} (id {2}) does not exist in the base game - refused under -BaseGame" -f $c.Name, $n, $it.ItemId)
                 $refused++
                 continue
@@ -89,6 +99,7 @@ foreach ($c in $target) {
                 # quantity always sits at handle+4, so this is phase-independent
                 [Array]::Copy([BitConverter]::GetBytes([uint32]$Quantity), 0, $bytes, $it.Offset + 4, 4)
                 $touched[$entry.Index] = $entry
+                [void]$writes.Add([pscustomobject]@{ Offset = $it.Offset + 4; Value = [uint32]$Quantity })
             }
             $changes++
         }
@@ -101,7 +112,7 @@ if (-not $changes) {
     else          { Write-Host "`nNo matching items found on the selected character." }
     return
 }
-if (-not $Apply) { Write-Host "`n(dry run - nothing written; add -Apply)"; return }
+if (-not $Apply) { Write-Host "`n(dry run - nothing written; re-run with -Apply to write)"; return }
 if (-not $touched.Count) { Write-Host "`nNothing needed changing."; return }
 
 $backup = "$($session.SavePath).bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
@@ -115,7 +126,17 @@ foreach ($e in $touched.Values) {
 [IO.File]::WriteAllBytes($session.SavePath, $bytes)
 Write-Host "Wrote $($session.SavePath) ($changes change(s))"
 
+# Verify from disk: every value at the offset it was meant for, and every checksum. A
+# good checksum on the edited slot says nothing about whether the write landed where it
+# was meant to.
 $verify = [IO.File]::ReadAllBytes($session.SavePath)
-$bad = @(Get-ErEntries -Bytes $verify | Where-Object { -not (Test-ErChecksum -Bytes $verify -Entry $_) })
+foreach ($w in $writes) {
+    $got = [BitConverter]::ToUInt32($verify, $w.Offset)
+    if ($got -ne $w.Value) {
+        throw ("VERIFY FAILED: 0x{0:x} reads {1} after writing {2} - restore from {3}" -f $w.Offset, $got, $w.Value, $backup)
+    }
+}
+$entriesOnDisk = @(Get-ErEntries -Bytes $verify)
+$bad = @($entriesOnDisk | Where-Object { -not (Test-ErChecksum -Bytes $verify -Entry $_) })
 if ($bad) { throw "VERIFY FAILED for: $($bad.Name -join ', ') - restore from $backup" }
-Write-Host 'Verified: all 12 entry checksums valid.'
+Write-Host ("Verified: values read back and all {0} entry checksums valid." -f $entriesOnDisk.Count)

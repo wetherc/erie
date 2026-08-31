@@ -103,7 +103,7 @@ foreach ($c in $target) {
 
 if ($missing -and -not $writes.Count) { Write-Host "`nNothing edited - no player block was located."; return }
 if (-not $writes.Count) { Write-Host "`nNothing needed changing."; return }
-if (-not $Apply) { Write-Host "`n(dry run - nothing written; add -Apply)"; return }
+if (-not $Apply) { Write-Host "`n(dry run - nothing written; re-run with -Apply to write)"; return }
 
 $backup = "$($session.SavePath).bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
 Copy-Item -LiteralPath $session.SavePath -Destination $backup
@@ -130,6 +130,7 @@ foreach ($w in $writes) {
         throw ("VERIFY FAILED: 0x{0:x} reads {1} after writing {2} - restore from {3}" -f $w.Offset, $got, $w.Value, $backup)
     }
 }
-$bad = @(Get-ErEntries -Bytes $verify | Where-Object { -not (Test-ErChecksum -Bytes $verify -Entry $_) })
+$entriesOnDisk = @(Get-ErEntries -Bytes $verify)
+$bad = @($entriesOnDisk | Where-Object { -not (Test-ErChecksum -Bytes $verify -Entry $_) })
 if ($bad) { throw "VERIFY FAILED for: $($bad.Name -join ', ') - restore from $backup" }
-Write-Host 'Verified: values read back and all 12 entry checksums valid.'
+Write-Host ("Verified: values read back and all {0} entry checksums valid." -f $entriesOnDisk.Count)
