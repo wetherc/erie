@@ -15,7 +15,7 @@ You need PowerShell. This works on Windows, sorry SteamOS
 
 **To edit saves**:
 
-- Windows with Windows PowerShell 5.1.
+- Windows with Windows PowerShell 5.1 or PowerShell 7.
 - Elden Ring must not be running.
 
 **To regenerate the reference tables**:
@@ -31,6 +31,12 @@ You need PowerShell. This works on Windows, sorry SteamOS
 
 ```bash
 powershell -ExecutionPolicy Bypass -NoProfile
+```
+
+Or, for PowerShell 7 (it keeps its own execution policy, separate from 5.1):
+
+```bash
+pwsh -ExecutionPolicy Bypass -NoProfile
 ```
 
 3. Check the install by listing what is in your saves:
@@ -177,6 +183,16 @@ Use `-Profile vanilla` for the base game. Both accept `-GameDir`, `-ModDir` and 
 Names and param ids are kept separate because mods leave stale vanilla data lying around. `paramids.tsv` is used for all item validation.
 
 Regenerate after **any** mod update. The Convergence mod renames a subset of vanilla ids, and a stale table will report the wrong item for an ID rather than failing. This isn't the worst thing in the world, it'll just be confusing next time you launch the game after the mis-mapped edit.
+
+---
+
+## Checking an engine
+
+```bash
+.\Test-ErCompat.ps1
+```
+
+This runs the parsing and crypto logic against synthetic data built in memory. It needs no game files and no saves. Run it under both engines after a PowerShell upgrade. Exit code 0 means every check passed.
 
 ---
 

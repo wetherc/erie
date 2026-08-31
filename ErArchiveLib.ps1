@@ -268,7 +268,12 @@ function Read-ErFmgNames {
 # 256-byte ciphertext block yields 255 plaintext bytes, left-zero-padded.
 
 if (-not ('ErArchive' -as [type])) {
-    Add-Type -ReferencedAssemblies 'System.Numerics' @'
+    # BigInteger lives in a different assembly per edition: System.Numerics on .NET
+    # Framework (Windows PowerShell 5.1), System.Runtime.Numerics on .NET (PowerShell 7).
+    # Passing the wrong name fails the compile with CS1069.
+    $erNumericsAssembly = if ($PSVersionTable.PSVersion.Major -ge 6) { 'System.Runtime.Numerics' }
+                          else                                       { 'System.Numerics' }
+    Add-Type -ReferencedAssemblies $erNumericsAssembly @'
 using System;
 using System.Numerics;
 
@@ -477,7 +482,7 @@ function Unprotect-ErArchiveEntry {
         the whole payload.  #>
     param([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)]$Entry)
 
-    $aes = New-Object Security.Cryptography.RijndaelManaged
+    $aes = [Security.Cryptography.Aes]::Create()
     $aes.KeySize = 128
     $aes.BlockSize = 128
     $aes.Key = $Entry.AesKey
@@ -542,7 +547,7 @@ function Get-ErRegulationFiles {
     $iv = New-Object byte[] 16
     [Array]::Copy($enc, 0, $iv, 0, 16)
 
-    $aes = New-Object Security.Cryptography.RijndaelManaged
+    $aes = [Security.Cryptography.Aes]::Create()
     $aes.KeySize = 256
     $aes.BlockSize = 128
     $aes.Mode = [Security.Cryptography.CipherMode]::CBC
