@@ -53,7 +53,7 @@ $chars = @(Get-ErCharacters -Bytes $bytes)
 Write-Host "`nCHARACTERS"
 foreach ($c in $chars) {
     if (-not $c.IsOccupied) { continue }
-    Write-Host ("   slot {0}  {1}" -f $c.Index, $c.Name)
+    Write-Host ("   slot {0}  {1,-18} level {2}" -f $c.Index, $c.Name, $c.Level)
 }
 Write-Host ''
 
@@ -69,6 +69,15 @@ foreach ($c in $chars) {
     Write-Host ("=== slot {0} '{1}' | {2} array(s), {3} records | checksum {4}" -f `
         $c.Index, $c.Name, $arrays.Count, $sum,
         $(if (Test-ErChecksum -Bytes $bytes -Entry $entry) { 'OK' } else { 'BAD' }))
+    # Runes live in the player block, not in any item array, so this is reported even
+    # when no array was found. A miss here is a scan that matched nothing, not an error.
+    $pd = Get-ErPlayerData -Bytes $bytes -Char $c
+    if ($null -ne $pd) {
+        Write-Host ("   level {0} | runes in hand {1:N0} | rune memory {2:N0}   (runes at 0x{3:x})" -f `
+            $pd.Level, $pd.Runes, $pd.RuneMemory, $pd.RunesOffset)
+    } else {
+        Write-Host '   player block not located - level and runes unavailable for this slot'
+    }
     if (-not $arrays.Count) { Write-Host "   no item array found`n"; continue }
 
     $n = 0

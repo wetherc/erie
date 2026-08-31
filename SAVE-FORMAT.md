@@ -127,6 +127,7 @@ contains only zero bytes. A used slot contains approximately 13% to 18% non-zero
 The slot payload is a sequence of structures of variable length. The structures include:
 
 * the GaItem table, at payload offset `+0x20` (see section 6);
+* the player block, which holds the stats, the level and the runes (see section 13);
 * one or more item arrays (see section 5);
 * equipment lists, which are plain arrays of handles;
 * acquisition tables, which are sorted arrays of `(goodsId, flag)` pairs.
@@ -609,7 +610,25 @@ An alternative operation has a lower risk. Write a new handle over the handle of
 unnecessary record. This operation uses an `inventory_index` that the game gave. It
 changes no count. It writes 8 bytes. The old item is lost.
 
-### 11.4 Conditions for all edits
+### 11.4 Safe: a change of the rune count
+
+The rune counter is one `u32` in the player block (section 13). The operation writes 4
+bytes and moves nothing. The rune memory field beside it is a second `u32` of the same
+kind.
+
+The value has a ceiling of 999999999. That number is the ceiling the game itself uses for
+a rune total. A larger value fits in the field but is not a value the game writes.
+
+Hold the rule that the rune memory is not less than the held count. The rune memory is
+the total of all runes that the character earned, so the game never writes a save file in
+which the held count is the larger of the two.
+
+The risk in this edit is not the write. It is the address. Nothing in the file points at
+the player block, so the address comes from a scan, and a scan that matches the wrong
+bytes writes into an unrelated structure. Section 13 gives the tests that the scan
+applies.
+
+### 11.5 Conditions for all edits
 
 1. Close the game first. The game writes the save file again when it stops. That
    operation discards all changes on the disk.
@@ -629,3 +648,85 @@ again at each run.
 
 For a regression test, use a character that is not in use. The record counts of such a
 character stay constant, and a change in the counts then shows an error in the reader.
+
+---
+
+## 13. The player block (level and runes)
+
+Each slot holds one player block. It carries the vital values, the eight stats, the
+level, the runes and the character name.
+
+### 13.1 Position
+
+The block follows the GaItem table. That table has a length that changes with the items
+of the character, so the block has no constant address. Measured starts, from the start
+of the slot payload:
+
+| Save | Characters | Range of the start |
+|---|---|---|
+| Convergence `.cnv` | 5 | `0xA296` - `0xA9F4` |
+| Vanilla `.sl2` | 10 | `0xA2A4` - `0xB712` |
+
+Nothing in the file points at the block. Find it at each run.
+
+### 13.2 Layout
+
+All fields are `u32`. The offsets below are relative to the **level** field, because the
+level is the field the scan matches:
+
+| Offset | Field |
+|---|---|
+| `-0x58` | hp |
+| `-0x54` | max hp |
+| `-0x50` | base max hp |
+| `-0x2C` | vigor |
+| `-0x28` | mind |
+| `-0x24` | endurance |
+| `-0x20` | strength |
+| `-0x1C` | dexterity |
+| `-0x18` | intelligence |
+| `-0x14` | faith |
+| `-0x10` | arcane |
+| `+0x00` | level |
+| `+0x04` | runes held |
+| `+0x08` | rune memory (the total of all runes earned) |
+| `+0x34` | character name, UTF-16LE, null terminated |
+
+The block is not 4-byte aligned. It follows a structure of variable length, so scan for
+it byte by byte, as for the item arrays (section 5.5).
+
+"Runes held" is the counter of the HUD. It is not a Rune item of the inventory: those are
+goods, with a goods id and a quantity, and section 5 covers them.
+
+### 13.3 Rules for a valid block
+
+A single test gives false matches. Apply all of these together:
+
+1. The level equals the level of the profile summary for that slot (section 13.4).
+2. The character name of the slot is at `+0x34`, and a null `u16` follows it. Without the
+   test for the terminator, "Rhea" also matches a character named "Rheagar".
+3. The eight stats are each in the range 1 to 999. The base game has a maximum of 99. A
+   mod raises it, so a limit of 99 here is too strict.
+4. The max hp is not zero, and the hp is not greater than the max hp.
+5. The held runes and the rune memory are each not greater than 999999999, and the rune
+   memory is not less than the held runes.
+
+These five tests together gave exactly one match for each of the 20 characters of the
+three save files of the test set. Test 1 alone gave two matches for one character, and
+test 2 alone gave one match for each character.
+
+### 13.4 The level of the profile summary
+
+The summary of `USER_DATA010` also holds the level of each slot, 0x22 bytes after the
+name of the slot (section 4.1):
+
+```
+level[i] = USER_DATA010.dataOffset + 16 + 0x195E + i * 0x24C + 0x22
+```
+
+This field is **not** 4-byte aligned, because the name before it has a length of 0x22
+bytes. Read it as an unaligned `u32`.
+
+This value is the cross-check of the scan. It comes from a different entry of the
+container than the player block, so a match of the two is strong evidence that the block
+is the block of that character.

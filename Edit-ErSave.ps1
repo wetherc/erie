@@ -15,6 +15,8 @@
                  THAT weapon (Get-ErWeaponCeiling; there is no single "+25")
     spirit ashes level, chosen from the ladder its name table actually defines
     goods        stack quantity, 1-999
+    runes        the count carried in hand, 0-999,999,999, with the option to raise
+                 rune memory (the lifetime total) alongside it
 
   Goods are offered as one list, key items and upgrade materials included. The operation
   on offer is "set the stack quantity", which is meaningful for anything that stacks, and
@@ -136,11 +138,16 @@ function Read-ErSlotState {
         }
     }
 
+    # $null when the player block could not be located. The runes action reports that;
+    # everything else in here is independent of it, so a miss must not stop the session.
+    $player = Get-ErPlayerData -Bytes $Bytes -Char $Char
+
     [pscustomobject]@{
         Char    = $Char
         Arrays  = $arrays
         Ladders = $ladders
         GoodsN  = $goodsN
+        Player  = $player
         Weapons = @($weapons | Sort-Object @{ E = { $_.Display } }, ParamId)
         Ashes   = @($ashes   | Sort-Object Family, Level)
         Goods   = @($goods   | Sort-Object @{ E = { $_.Display } }, ItemId)
@@ -385,6 +392,46 @@ function Invoke-ErAshAction {
     }
 }
 
+function Invoke-ErRunesAction {
+    <#  Set the runes in hand.
+
+        Rune memory (the lifetime total) is offered as a second write when the new
+        balance would exceed it, rather than folded into the first: every write in this
+        tool is one confirmed u32, and quietly changing a second field under a
+        confirmation that named only the first would break that.  #>
+    param($Session, [byte[]]$Bytes, $State, $Prof, $Vanilla, [int]$PageSize)
+
+    $p = $State.Player
+    if ($null -eq $p) {
+        Write-Host '  No player block was located in this slot, so the rune counter cannot be edited. Everything else still works.'
+        return
+    }
+
+    $max = Get-ErMaxRunes
+    Write-Host ("`n  RUNES   level {0}, holding {1:N0}, rune memory {2:N0}" -f $p.Level, $p.Runes, $p.RuneMemory)
+    $n = Read-ErInt -Prompt '  Runes in hand' -Min 0 -Max $max
+    if ($null -eq $n) { return }
+    if ($n -eq $p.Runes) { Write-Host '  Already holding that many.'; return }
+
+    $ok = Invoke-ErSaveWrite -Session $Session -Bytes $Bytes -Entry $State.Char.Entry `
+              -Offset $p.RunesOffset -Old ([uint32]$p.Runes) -New ([uint32]$n) `
+              -Label ('runes  {0:N0} -> {1:N0}' -f $p.Runes, $n)
+    if (-not $ok) { return }
+    $p.Runes = [int64]$n
+
+    # The game never writes a save holding more runes than were ever earned, so leaving
+    # memory below the new balance would be a state it does not produce.
+    if ($n -gt $p.RuneMemory) {
+        Write-Host ("`n  Rune memory ({0:N0}, the lifetime total) is now below what is held." -f $p.RuneMemory)
+        if (Read-ErYesNo -Question '  Raise it to match?' -DefaultYes) {
+            $ok2 = Invoke-ErSaveWrite -Session $Session -Bytes $Bytes -Entry $State.Char.Entry `
+                       -Offset $p.MemoryOffset -Old ([uint32]$p.RuneMemory) -New ([uint32]$n) `
+                       -Label ('rune memory  {0:N0} -> {1:N0}' -f $p.RuneMemory, $n)
+            if ($ok2) { $p.RuneMemory = [int64]$n }
+        }
+    }
+}
+
 function Invoke-ErGoodsAction {
     param($Session, [byte[]]$Bytes, $State, $Prof, $Vanilla, [int]$PageSize)
 
@@ -438,6 +485,7 @@ $menu = @(
     [pscustomobject]@{ Key = 'weapon'; Text = 'Weapons - set reinforcement level' }
     [pscustomobject]@{ Key = 'ash';    Text = 'Spirit ashes - set level' }
     [pscustomobject]@{ Key = 'goods';  Text = 'Goods - set stack quantity (key items and upgrade materials included)' }
+    [pscustomobject]@{ Key = 'runes';  Text = 'Runes - set the count carried in hand' }
     [pscustomobject]@{ Key = 'char';   Text = 'Change character' }
 )
 
@@ -448,6 +496,12 @@ while ($true) {
         $(if (Test-ErChecksum -Bytes $bytes -Entry $c.Entry) { 'OK' } else { 'BAD' }))
     Write-Host ("{0} weapon(s), {1} spirit ash(es), {2} goods record(s)" -f `
         $state.Weapons.Count, $state.Ashes.Count, $state.Goods.Count)
+    if ($null -ne $state.Player) {
+        Write-Host ("level {0}   runes in hand {1:N0}   rune memory {2:N0}" -f `
+            $state.Player.Level, $state.Player.Runes, $state.Player.RuneMemory)
+    } else {
+        Write-Host 'level/runes: player block not located in this slot'
+    }
     # a0/a1/... on each row refer to these. The largest array is normally the held
     # inventory; the smaller ones are key items and the storage box, and the box mirrors
     # held items, so one name can appear in two of them.
@@ -466,6 +520,7 @@ while ($true) {
         'weapon' { Invoke-ErWeaponAction -Session $session -Bytes $bytes -State $state -Prof $prof -Vanilla $vanilla -PageSize $PageSize }
         'ash'    { Invoke-ErAshAction    -Session $session -Bytes $bytes -State $state -Prof $prof -Vanilla $vanilla -PageSize $PageSize }
         'goods'  { Invoke-ErGoodsAction  -Session $session -Bytes $bytes -State $state -Prof $prof -Vanilla $vanilla -PageSize $PageSize }
+        'runes'  { Invoke-ErRunesAction  -Session $session -Bytes $bytes -State $state -Prof $prof -Vanilla $vanilla -PageSize $PageSize }
         'char'   {
             $all = @(Get-ErCharacters -Bytes $bytes | Where-Object { $_.IsOccupied })
             $n = Select-ErOption -Prompt 'Which character?' -Options $all -AllowEscape `

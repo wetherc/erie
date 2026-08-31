@@ -231,7 +231,7 @@ function Get-ErGoodsNameTable {
 # hold no character, so occupancy is decided from the slot payload itself, not the name.
 
 function Get-ErCharacters {
-    <#  Returns one row per save slot: Index, Name, IsOccupied, Entry.
+    <#  Returns one row per save slot: Index, Name, Level, IsOccupied, Entry.
         Sampling the slot payload for non-zero bytes distinguishes a real character from
         a stale leftover name: an unused slot is entirely zero-filled.  #>
     param([Parameter(Mandatory)][byte[]]$Bytes)
@@ -256,9 +256,16 @@ function Get-ErCharacters {
         $nz = 0
         for ($q = $ds; $q -lt $de; $q += 64) { if ($Bytes[$q] -ne 0) { $nz++ } }
 
+        # Level comes from the same summary block, 0x22 past the name and NOT 4-byte
+        # aligned. It is the cross-check that anchors the player block inside the slot
+        # payload (Get-ErPlayerData), so it is read here rather than rediscovered there.
+        $lvl = [BitConverter]::ToUInt32($Bytes, $p + 0x22)
+        if ($nz -eq 0 -or $lvl -gt 9999) { $lvl = 0 }
+
         [pscustomobject]@{
             Index      = $e.Index
             Name       = $sb.ToString()
+            Level      = [int]$lvl
             IsOccupied = ($nz -gt 0)
             Entry      = $e
         }
@@ -283,6 +290,137 @@ function Resolve-ErSlot {
         throw "'$Character' is ambiguous: $(($hit | ForEach-Object { $_.Name }) -join ', ')"
     }
     $hit[0].Index
+}
+
+# --- Player data: level and runes ----------------------------------------------
+# A slot opens with its GaItem table, whose length varies per character, and the player
+# block sits after it. Nothing in the file points at that block, so it is LOCATED BY A
+# SCAN and not by a constant: measured starts ran from 0xA296 to 0xB712 across the 20
+# characters in the three saves this was built against, so any one constant would be
+# wrong for nearly all of them.
+#
+# Offsets below are relative to the LEVEL field, which is what the scan returns:
+#     -0x58 hp        -0x54 max hp      -0x50 base max hp
+#     -0x2C .. -0x10  vigor, mind, endurance, strength, dexterity, intelligence,
+#                     faith, arcane (eight u32s, in that order)
+#     +0x00 level     +0x04 runes held  +0x08 rune memory (lifetime total earned)
+#     +0x34 character name, UTF-16LE, null terminated
+# See SAVE-FORMAT.md section 13.
+
+# The rune counter is a u32, but the game's own ceiling is 999,999,999: that is the cap
+# on a rune item and on what the HUD renders. Nothing here writes above it.
+$script:ErMaxRunes = 999999999
+
+if (-not ('ErPlayerScan' -as [type])) {
+    Add-Type @'
+using System;
+using System.Collections.Generic;
+
+public static class ErPlayerScan
+{
+    // Candidate offsets of the LEVEL field. Byte-aligned, because the player block
+    // follows a variable-length table and is not reliably 4-aligned.
+    public static List<int> Find(byte[] b, int start, int end, int level, byte[] name)
+    {
+        var hits = new List<int>();
+        for (int p = start + 0x58; p + 0x100 < end; p++)
+        {
+            uint lv = BitConverter.ToUInt32(b, p);
+            if (lv < 1 || lv > 9999) continue;
+            if (level > 0 && lv != (uint)level) continue;
+
+            if (name != null && name.Length > 0)
+            {
+                bool ok = true;
+                for (int k = 0; k < name.Length; k++)
+                    if (b[p + 0x34 + k] != name[k]) { ok = false; break; }
+                if (!ok) continue;
+                // The stored name is null terminated. Without this, "Rhea" would also
+                // match a character called "Rheagar".
+                if (b[p + 0x34 + name.Length] != 0 || b[p + 0x35 + name.Length] != 0) continue;
+            }
+
+            bool bad = false;
+            for (int s = 0; s < 8; s++)
+            {
+                uint v = BitConverter.ToUInt32(b, p - 0x2C + s * 4);
+                if (v < 1 || v > 999) { bad = true; break; }   // 99 in vanilla; mods raise it
+            }
+            if (bad) continue;
+
+            uint hp = BitConverter.ToUInt32(b, p - 0x58);
+            uint maxHp = BitConverter.ToUInt32(b, p - 0x54);
+            if (maxHp == 0 || maxHp > 99999 || hp > maxHp) continue;
+
+            uint runes = BitConverter.ToUInt32(b, p + 4);
+            uint memory = BitConverter.ToUInt32(b, p + 8);
+            // Rune memory is the lifetime total, so it can never be below what is held.
+            if (runes > 999999999 || memory > 999999999 || memory < runes) continue;
+
+            hits.Add(p);
+        }
+        return hits;
+    }
+}
+'@
+}
+
+function Get-ErPlayerData {
+    <#  A character's level, held runes and rune memory, with the offsets to write to.
+
+        The block is found by matching THREE things at once: the level the profile
+        summary reports for that slot, the character's name at +0x34, and a plausible
+        stat/HP/rune block around them. Any one of those alone is not enough to bet a
+        write on, and a write here goes into a structure with no length field and no
+        checksum of its own, so a near-miss corrupts the character rather than failing.
+
+        Returns $null when no block matches, which is a real possibility on a save this
+        was never tested against; callers report it rather than guessing an offset.  #>
+    param(
+        [Parameter(Mandatory)][byte[]]$Bytes,
+        [Parameter(Mandatory)]$Char
+    )
+    $ds = $Char.Entry.DataOffset + 16
+    $de = $Char.Entry.DataOffset + $Char.Entry.Size
+    $nameBytes = if ($Char.Name) { [Text.Encoding]::Unicode.GetBytes($Char.Name) } else { $null }
+
+    $hits = @([ErPlayerScan]::Find($Bytes, $ds, $de, [int]$Char.Level, $nameBytes))
+    if (-not $hits.Count) { return $null }
+    if ($hits.Count -gt 1) {
+        # Never seen in testing. Reported rather than silently resolved, because the
+        # tie-break would be a guess about which copy the game reads.
+        Write-Warning ("Slot {0} '{1}': {2} candidate player blocks; using the first (0x{3:x})." -f `
+            $Char.Index, $Char.Name, $hits.Count, $hits[0])
+    }
+    $p = $hits[0]
+
+    [pscustomobject]@{
+        Slot         = $Char.Index
+        Name         = $Char.Name
+        Offset       = $p                      # the level field: everything else is relative
+        RunesOffset  = $p + 4
+        MemoryOffset = $p + 8
+        Level        = [int][BitConverter]::ToUInt32($Bytes, $p)
+        Runes        = [int64][BitConverter]::ToUInt32($Bytes, $p + 4)
+        RuneMemory   = [int64][BitConverter]::ToUInt32($Bytes, $p + 8)
+        Hp           = [int][BitConverter]::ToUInt32($Bytes, $p - 0x58)
+        MaxHp        = [int][BitConverter]::ToUInt32($Bytes, $p - 0x54)
+        Stats        = [ordered]@{
+            Vigor        = [int][BitConverter]::ToUInt32($Bytes, $p - 0x2C)
+            Mind         = [int][BitConverter]::ToUInt32($Bytes, $p - 0x28)
+            Endurance    = [int][BitConverter]::ToUInt32($Bytes, $p - 0x24)
+            Strength     = [int][BitConverter]::ToUInt32($Bytes, $p - 0x20)
+            Dexterity    = [int][BitConverter]::ToUInt32($Bytes, $p - 0x1C)
+            Intelligence = [int][BitConverter]::ToUInt32($Bytes, $p - 0x18)
+            Faith        = [int][BitConverter]::ToUInt32($Bytes, $p - 0x14)
+            Arcane       = [int][BitConverter]::ToUInt32($Bytes, $p - 0x10)
+        }
+    }
+}
+
+function Get-ErMaxRunes {
+    <#  The highest rune count the editors will write. #>
+    $script:ErMaxRunes
 }
 
 # --- Name tables --------------------------------------------------------------

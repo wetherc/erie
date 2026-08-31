@@ -77,7 +77,7 @@ The build is detected from the save extension, then from the mod's `altsaves.tom
 .\Show-ErInventory.ps1
 ```
 
-Lists every character, every item array in each slot, and the consumables each character has. Weapons and armour show as `<cat 0x8 id 524>` here, for full item information you need to use `Show-ErEquipment.ps1`.
+Lists every character, every item array in each slot, and the consumables each character has. Each slot also gets a line with its level, the runes it is carrying and its rune memory. Weapons and armour show as `<cat 0x8 id 524>` here, for full item information you need to use `Show-ErEquipment.ps1`.
 
 Filters: `-Character`, `-Slot`, `-NameLike`, `-ItemId`, `-GoodsOnly`.
 
@@ -110,6 +110,26 @@ holds are edited, this will never add new items that your character doesn't alre
 
 On `-Apply` the script takes a timestamped backup next to the save, patches the save, recomputes the slot MD5, and re-verifies the edits from disk.
 
+### Change the runes a character is carrying
+
+```bash
+.\Edit-ErRunes.ps1 -Save ER0000.cnv -Character Spantz -Runes 999999999
+```
+
+```bash
+.\Edit-ErRunes.ps1 -Save ER0000.cnv -Character Spantz -Runes 999999999 -Apply
+```
+
+Dry runs by default, same as everything else. `-Runes` is the new balance, 0 through 999,999,999 (the game's own ceiling). Add `-Add` to treat the number as an amount to add to what the character already holds instead, capped at the same ceiling.
+
+This is the rune counter in the corner of the HUD. It is not a Rune item sitting in the inventory: those are goods, so they belong to `Edit-ErItemQuantity.ps1`.
+
+The save also tracks *rune memory*, the lifetime total of every rune the character has earned. When the new balance would be higher than that total, rune memory is raised to match, because the game never writes a save holding more runes than were ever earned. `-SkipRuneMemory` leaves it alone.
+
+`-BaseGame` is accepted here for consistency but does nothing: a rune count is the same plain number in either build, so there is nothing that could fail to load without the mod.
+
+The runes live in a structure that nothing in the file points at, so it is located by a scan on every run: the character's level (cross-checked against the profile summary), their name, and a sane stat and HP block all have to line up before anything is written. If no block matches, the script says so for that character and writes nothing rather than guessing an offset.
+
 ### Raise weapon and spirit-ash levels
 
 ```bash
@@ -128,7 +148,9 @@ Options: `-MaxWeaponLevel <n>` caps the result further ("no higher than", if you
 .\Edit-ErSave.ps1 -Save ER0000.cnv -Character Frieren
 ```
 
-I hate PowerShell, so we got an interactive tool that lets me pretend this is written with literally any other framework. Pick a character, then weapons (set level), spirit ashes (set level) or consumables (set quantity). Item lists are paginated and can be filtered: Enter advances to the next page, `p` returns to the previous page, `/text` lets you apply filters, `/` clears the page, Esc goes back.
+I hate PowerShell, so we got an interactive tool that lets me pretend this is written with literally any other framework. Pick a character, then weapons (set level), spirit ashes (set level), consumables (set quantity) or runes (set the count in hand). Item lists are paginated and can be filtered: Enter advances to the next page, `p` returns to the previous page, `/text` lets you apply filters, `/` clears the page, Esc goes back.
+
+The header above the menu shows the selected character's level, runes in hand and rune memory. Raising rune memory alongside the runes is offered as its own confirmation, because every write in here is one confirmed value.
 
 One backup is taken before the first write of the session, and the save file is re-checked before every write and not just at startup.
 
