@@ -365,12 +365,20 @@ the ceiling from the regulation file.
 Spirit ashes are goods. The level is a component of the goods id. The handle contains the
 id. Therefore, no GaItem entry is necessary.
 
-The name table contains one entry for each level, for example "Lone Wolf Ashes +10". Find
-the levels of a family and its maximum level by the name. Do not calculate the levels
-from the id.
+The name table contains one entry for each level. A family occupies a run of consecutive
+ids whose names read "<family>", "<family> +1" ... "<family> +10", with the base id at
+level 0. Read the levels of a family and its maximum level out of that run.
 
-Arithmetic on the id is not safe. Flasks and pots also use "+N" names, but their ids
-increase by 2 for each level. Of 68 ash families, 66 families have a maximum of +10.
+Do not identify a family by its name. Ashes upgraded with grave glovewort are named
+"<something> Ashes", but the ones upgraded with ghost glovewort are named after the
+spirit ("Black Knife Tiche", "Lhutel the Headless", "Nepheli Loux Puppet") and contain no
+such word. Matching on "Ashes" silently drops 32 of the 83 vanilla families and 45 of the
+111 Convergence families.
+
+Arithmetic on the id alone is not safe either. Flasks also use "+N" names and step their
+ids by 2 per level. Two conditions together are sufficient: an id at or above 200000, the
+floor of the goods block the ashes live in, and a name at each step that matches its own
+level. Under that rule all 83 vanilla families have a maximum of +10.
 
 ---
 

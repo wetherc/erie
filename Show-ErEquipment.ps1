@@ -9,7 +9,8 @@
 
   Weapon reinforcement level is the last two digits of the weapon param id
   (the affinity sits in the hundreds digits and is part of the base).
-  Spirit ashes are goods whose level is encoded in the goods id, one name per level.
+  Spirit ashes are goods whose level is encoded in the goods id, one name per level;
+  that covers the named ghost-glovewort spirits as well as the "... Ashes" ones.
 
   Names and upgrade ceilings both come from the resolved PROFILE, so the same weapon
   reads "+10 of 25" under the base game and "+10 of 15" under Convergence.

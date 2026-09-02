@@ -14,6 +14,7 @@
     weapons      reinforcement level, validated against the ceiling THIS build gives
                  THAT weapon (Get-ErWeaponCeiling; there is no single "+25")
     spirit ashes level, chosen from the ladder its name table actually defines
+                 (grave- and ghost-glovewort spirits alike)
     goods        stack quantity, 1-999
     runes        the count carried in hand, 0-999,999,999, with the option to raise
                  rune memory (the lifetime total) alongside it

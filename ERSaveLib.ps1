@@ -615,33 +615,69 @@ function Get-ErEquipment {
     }
 }
 
+
 # --- Spirit ashes -------------------------------------------------------------
 # A spirit ash is a GOOD, so its level is encoded in the id carried by the inventory
-# handle itself, so no GaItem lookup is needed. The name table carries one entry per
-# level ("Lone Wolf Ashes", "Lone Wolf Ashes +1" ... "+10"), so a family's levels and its
-# maximum are read straight out of the names rather than assumed from id arithmetic.
-# That distinction matters: flasks and pots also use "+N" names but step ids by 2 per
-# level, so an arithmetic rule would mis-target them.
+# handle itself, so no GaItem lookup is needed. A family occupies a run of consecutive
+# ids whose names read "<family>", "<family> +1" ... "<family> +10", so a family's levels
+# and its maximum are read out of that run rather than assumed from id arithmetic alone.
+#
+# The family name is NOT a reliable marker. Ashes upgraded with grave glovewort are named
+# "<something> Ashes", but the named spirits upgraded with GHOST glovewort are not
+# ("Black Knife Tiche", "Lhutel the Headless", "Jolan and Anna"), so matching on "Ashes"
+# silently drops every one of them. What all of them do share is the shape of the ladder
+# and the goods id block they live in.
+#
+# Both halves of the rule are needed. Flasks also carry "+N" names, from ids well below
+# the ash block, and step by 2 per level; pots sit inside the block but form no ladder.
+# Requiring an id at or above the block floor AND a name that matches its own level keeps
+# each of those out.
+
+$script:ErAshMinGoodsId = 200000   # floor of the goods id block spirit ashes live in
 
 function Get-ErAshLadders {
     <#  Returns familyName -> @{ Max = <int>; ByLevel = @{ level -> id } } for every
-        goods family whose names look like spirit ashes.  #>
+        goods family that forms a spirit ash ladder.  #>
     param($GoodsNames, $Profile)
     if (-not $GoodsNames) { $GoodsNames = Get-ErNameTable -Family Goods -Profile $Profile }
 
     $ladders = @{}
-    foreach ($id in $GoodsNames.Keys) {
-        $nm = $GoodsNames[$id]
-        if ($nm -notmatch 'Ashes(\s\+\d+)?\s*$') { continue }
-        $level = 0
-        $fam = $nm
-        if ($nm -match '^(.*?)\s\+(\d+)\s*$') { $fam = $Matches[1]; $level = [int]$Matches[2] }
+    foreach ($key in @($GoodsNames.Keys)) {
+        $base = [int]$key
+        if ($base -lt $script:ErAshMinGoodsId) { continue }
+        $fam = $GoodsNames[$key]
+        if (-not $fam) { continue }
         $fam = $fam.Trim()
-        if (-not $ladders.ContainsKey($fam)) { $ladders[$fam] = @{ Max = 0; ByLevel = @{} } }
-        $ladders[$fam].ByLevel[$level] = [int]$id
-        if ($level -gt $ladders[$fam].Max) { $ladders[$fam].Max = $level }
+        if ($fam -match '\s\+\d+$') { continue }        # a rung, not the foot of a ladder
+
+        $byLevel = @{ 0 = $base }
+        $max = 0
+        for ($lvl = 1; ; $lvl++) {
+            $next = $base + $lvl
+            if (-not $GoodsNames.ContainsKey($next)) { break }
+            if ($GoodsNames[$next].Trim() -ne ('{0} +{1}' -f $fam, $lvl)) { break }
+            $byLevel[$lvl] = $next
+            $max = $lvl
+        }
+        if ($max -lt 1) { continue }                    # a lone good, not a ladder
+        if ($ladders.ContainsKey($fam) -and $ladders[$fam].Max -ge $max) { continue }
+        $ladders[$fam] = @{ Max = $max; ByLevel = $byLevel }
     }
     $ladders
+}
+
+function Get-ErAshIdIndex {
+    <#  id -> @{ Family; Level } over every rung of every ladder, so a held good can be
+        recognised as a spirit ash by its id rather than by the shape of its name.  #>
+    param($Ladders)
+    $ix = @{}
+    foreach ($fam in $Ladders.Keys) {
+        $ladder = $Ladders[$fam]
+        foreach ($lvl in $ladder.ByLevel.Keys) {
+            $ix[[int]$ladder.ByLevel[$lvl]] = @{ Family = $fam; Level = [int]$lvl }
+        }
+    }
+    $ix
 }
 
 function Get-ErSpiritAshes {
@@ -657,25 +693,23 @@ function Get-ErSpiritAshes {
     if (-not $Inventories) { $Inventories = @(Find-ErInventories -Bytes $Bytes -Entry $Entry) }
     if (-not $GoodsNames)  { $GoodsNames  = Get-ErNameTable -Family Goods -Profile $Profile }
     if (-not $Ladders)     { $Ladders     = Get-ErAshLadders -GoodsNames $GoodsNames }
+    $byId = Get-ErAshIdIndex -Ladders $Ladders
 
     foreach ($inv in $Inventories) {
         foreach ($it in (Get-ErInventoryItems -Bytes $Bytes -Inventory $inv)) {
             if (-not $it.IsGoods) { continue }
-            if (-not $GoodsNames.ContainsKey($it.ItemId)) { continue }
-            $nm = $GoodsNames[$it.ItemId]
-            if ($nm -notmatch 'Ashes(\s\+\d+)?\s*$') { continue }
-            $level = 0; $fam = $nm
-            if ($nm -match '^(.*?)\s\+(\d+)\s*$') { $fam = $Matches[1]; $level = [int]$Matches[2] }
-            $fam = $fam.Trim()
-            if (-not $Ladders.ContainsKey($fam)) { continue }
+            if (-not $byId.ContainsKey([int]$it.ItemId)) { continue }
+            $hit    = $byId[[int]$it.ItemId]
+            $fam    = $hit.Family
+            $level  = $hit.Level
             $ladder = $Ladders[$fam]
-            $topId = $null
+            $topId  = $null
             if ($ladder.ByLevel.ContainsKey($ladder.Max)) { $topId = $ladder.ByLevel[$ladder.Max] }
             [pscustomobject]@{
                 Offset   = $it.Offset
                 ItemId   = $it.ItemId
                 Family   = $fam
-                Name     = $nm
+                Name     = $(if ($GoodsNames.ContainsKey($it.ItemId)) { $GoodsNames[$it.ItemId] } else { $fam })
                 Level    = $level
                 MaxLevel = $ladder.Max
                 MaxId    = $topId
@@ -684,4 +718,3 @@ function Get-ErSpiritAshes {
         }
     }
 }
-

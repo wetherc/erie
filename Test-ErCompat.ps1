@@ -195,16 +195,27 @@ Assert-Er ((Get-ErWeaponCeiling -Profile $profVan -BaseId 100 -BaseGameProfile $
 Assert-Er ((Get-ErWeaponCeiling -Profile $profConv -BaseId 200 -BaseGameProfile $profVan) -eq 0) 'a weapon absent from vanilla clamps to 0 under -BaseGame'
 
 Write-Host 'spirit-ash ladders (Get-ErAshLadders)'
-$goodsNames = @{
-    200 = 'Lone Wolf Ashes'; 201 = 'Lone Wolf Ashes +1'; 210 = 'Lone Wolf Ashes +10'
-    300 = 'Crimson Tear Flask +3'
-    400 = 'Wandering Noble Ashes'
+# Ids matter here: a ladder is recognised by its shape inside the goods block spirit
+# ashes live in, not by the word "Ashes" in its name, because the ghost-glovewort
+# spirits are named after the spirit itself and carry no such word.
+$goodsNames = @{ 300 = 'Crimson Tear Flask'; 302 = 'Crimson Tear Flask +1'; 304 = 'Crimson Tear Flask +2' }
+foreach ($i in 0..10) {
+    $suffix = $(if ($i) { " +$i" } else { '' })
+    $goodsNames[203000 + $i] = "Lone Wolf Ashes$suffix"          # grave glovewort
+    $goodsNames[258000 + $i] = "Lhutel the Headless$suffix"      # ghost glovewort
 }
+$goodsNames[204000] = 'Wandering Noble Ashes'                    # no rungs at all
+$goodsNames[2000300] = 'Hefty Fire Pot'                          # in the block, no ladder
 $ladders = Get-ErAshLadders -GoodsNames $goodsNames
 Assert-Er ($ladders.ContainsKey('Lone Wolf Ashes') -and $ladders['Lone Wolf Ashes'].Max -eq 10) 'ladder and its maximum come from the names'
-Assert-Er ($ladders['Lone Wolf Ashes'].ByLevel[10] -eq 210) 'the top level maps to its id'
+Assert-Er ($ladders['Lone Wolf Ashes'].ByLevel[10] -eq 203010) 'the top level maps to its id'
+Assert-Er ($ladders.ContainsKey('Lhutel the Headless') -and $ladders['Lhutel the Headless'].Max -eq 10) 'a ghost-glovewort spirit is a ladder even with no "Ashes" in its name'
 Assert-Er (-not $ladders.ContainsKey('Crimson Tear Flask')) 'flasks with +N names are not ashes'
-Assert-Er ($ladders['Wandering Noble Ashes'].Max -eq 0) 'a single-level family has maximum 0'
+Assert-Er (-not $ladders.ContainsKey('Wandering Noble Ashes')) 'a family with no +N rungs is not a ladder'
+Assert-Er (-not $ladders.ContainsKey('Hefty Fire Pot')) 'a good in the ash id block with no ladder is not an ash'
+$ix = Get-ErAshIdIndex -Ladders $ladders
+Assert-Er ($ix[258007].Family -eq 'Lhutel the Headless' -and $ix[258007].Level -eq 7) 'the id index carries family and level for every rung'
+Assert-Er (-not $ix.ContainsKey(302)) 'the id index excludes non-ash "+N" goods'
 
 # --- archive crypto -------------------------------------------------------------
 

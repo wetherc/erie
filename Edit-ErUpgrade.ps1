@@ -18,8 +18,10 @@
 
   * SPIRIT ASHES: these are goods, so the level is encoded in the id carried by the
     inventory handle. The edit rewrites the handle to 0xB0000000 | <max-level id>. The
-    target id is looked up by NAME from the goods table ("Lone Wolf Ashes +10"), never
-    by id arithmetic, because flasks and pots also use "+N" names but step ids by 2.
+    target id is the top of the ladder the goods table actually defines for that family,
+    found by walking the run of consecutive ids whose names read "<family>",
+    "<family> +1" ... "<family> +10". Ghost-glovewort spirits ("Lhutel the Headless")
+    carry no "Ashes" in their names, so the ladder shape, not the name, is the test.
 
   Neither edit changes a record count, allocates an inventory_index, or moves anything,
   which puts both in the same risk class as a quantity edit. What is NOT verified is
