@@ -589,12 +589,265 @@ function Read-ErInt {
     }
 }
 
-function Select-ErOption {
-    <#  Numbered pick-one prompt. Non-interactively this throws and lists the options in
-        the message, so the caller learns what to pass instead of hanging.
+# ==============================================================================
+#  Pick-one prompts
+# ==============================================================================
+# Two ways to pick, one shape of answer. On a real console the list is drawn once and
+# redrawn in place: the arrow keys move a highlight, typing filters, Enter takes the row
+# under the cursor, Esc backs out. Where that is not possible the numbered prompt this
+# toolkit used everywhere before takes over, so no caller depends on the drawn menu being
+# available: a redirected stdout, the ISE, or a window with no room all fall back rather
+# than fail.
+#
+# The absolute position of each item in the UNFILTERED list stays on every row. Filtering
+# and scrolling never renumber it, so an item keeps the same number before and after a
+# search, and the two paths agree on what that number means.
 
-        Esc returns $null with -AllowEscape, and otherwise cancels the whole run. Reading
-        through Read-ErLine rather than Read-Host is what makes Esc detectable.  #>
+$script:ErNoRawKeys = $false     # set once a host turns out not to support the drawn menu
+
+function Test-ErRawKeys {
+    <#  Can this host draw a menu in place and read one key at a time?
+
+        Probed rather than assumed, and remembered: the answer cannot change inside a
+        run. ReadKey itself is NOT part of the probe - it would eat a keystroke - so a
+        host that fails only there is caught by the try/catch in Select-ErItem instead.  #>
+    if ($script:ErNoRawKeys) { return $false }
+    try {
+        if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+            $script:ErNoRawKeys = $true; return $false
+        }
+        # A window with no room for a title, one row and the two footer lines cannot show
+        # a menu at all, and CursorTop throws outright on hosts with no real console.
+        if ([Console]::WindowWidth -lt 24 -or [Console]::WindowHeight -lt 8) {
+            $script:ErNoRawKeys = $true; return $false
+        }
+        $null = [Console]::CursorTop
+        return $true
+    }
+    catch { $script:ErNoRawKeys = $true; return $false }
+}
+
+function Read-ErKey {
+    <#  One keystroke, not echoed.
+
+        A one-line wrapper worth having for the same reason Read-ErLine is the only place
+        a line is read: it is the single point where the drawn menu takes input, so the
+        menu's behaviour can be exercised by standing in for this rather than by driving
+        a real console.  #>
+    [Console]::ReadKey($true)
+}
+
+function Write-ErPickerLine {
+    <#  One line of the drawn menu, padded to the full width so that whatever the previous
+        frame left on that row is erased, and truncated to it as well: a line that wraps
+        takes two rows, and the frame is redrawn by row count.  #>
+    param([string]$Text = '', [Parameter(Mandatory)][int]$Width, [switch]$Selected)
+    if ($Text.Length -gt $Width) { $Text = $Text.Substring(0, $Width) }
+    $Text = $Text.PadRight($Width)
+    if (-not $Selected) { [Console]::WriteLine($Text); return }
+    $fg = [Console]::ForegroundColor
+    $bg = [Console]::BackgroundColor
+    try {
+        [Console]::ForegroundColor = [ConsoleColor]::Black
+        [Console]::BackgroundColor = [ConsoleColor]::Gray
+        [Console]::WriteLine($Text)
+    }
+    finally { [Console]::ForegroundColor = $fg; [Console]::BackgroundColor = $bg }
+}
+
+function Select-ErDrawnMenu {
+    <#  The drawn menu. Returns the chosen item, or $null for Esc.
+
+        The frame is a fixed number of rows for the life of the call - short lists and
+        filtered-away rows are padded with blanks - because a frame that changed height
+        would leave the tail of the previous one on screen.
+
+        Room for the frame is made by scrolling FIRST and only then recording where its
+        top ended up: printing on the last row of the buffer is itself what scrolls, so a
+        position recorded before that would point one row too high for the rest of the
+        session.
+
+        Throws whatever the console throws; Select-ErItem catches and falls back.  #>
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][object[]]$Items,
+        [Parameter(Mandatory)][scriptblock]$Label,
+        [int]$PageSize = 20,
+        [switch]$NoFilter
+    )
+    $labels = @(0..($Items.Count - 1) | ForEach-Object { [string](& $Label $Items[$_]) })
+    $rows   = [Math]::Max(1, [Math]::Min($PageSize, [Math]::Min($Items.Count, [Console]::WindowHeight - 6)))
+    $lines  = $rows + 3                       # title, rows, search box, key help
+    $filter = ''
+    $cursor = 0
+    $top    = 0
+
+    for ($i = 0; $i -lt $lines; $i++) { [Console]::WriteLine() }
+    $anchor = [Console]::CursorTop - $lines
+
+    try {
+        while ($true) {
+            $width = [Math]::Max(24, [Console]::WindowWidth - 1)
+            $shown = @(0..($Items.Count - 1) | Where-Object { -not $filter -or $labels[$_] -like "*$filter*" })
+
+            if ($cursor -ge $shown.Count) { $cursor = $shown.Count - 1 }
+            if ($cursor -lt 0)            { $cursor = 0 }
+            if ($cursor -lt $top)         { $top = $cursor }
+            if ($cursor -ge $top + $rows) { $top = $cursor - $rows + 1 }
+            $topMax = [Math]::Max(0, $shown.Count - $rows)
+            if ($top -gt $topMax) { $top = $topMax }
+            if ($top -lt 0)       { $top = 0 }
+
+            [Console]::SetCursorPosition(0, $anchor)
+            $count = if ($filter) { '{0} of {1} shown' -f $shown.Count, $Items.Count }
+                     else         { '{0} item(s)' -f $Items.Count }
+            Write-ErPickerLine -Width $width -Text ('  {0}  -  {1}' -f $Title, $count)
+            for ($r = 0; $r -lt $rows; $r++) {
+                $k = $top + $r
+                if ($k -ge $shown.Count) { Write-ErPickerLine -Width $width; continue }
+                $n   = $shown[$k]
+                $sel = ($k -eq $cursor)
+                Write-ErPickerLine -Width $width -Selected:$sel `
+                    -Text ('{0} [{1,4}] {2}' -f $(if ($sel) { '>' } else { ' ' }), $n, $labels[$n])
+            }
+            if ($NoFilter) {
+                Write-ErPickerLine -Width $width
+                Write-ErPickerLine -Width $width -Text '  up/down = move   Enter = choose   Esc = back'
+            }
+            else {
+                $note = if ($shown.Count) { '' } else { '   (nothing matches - Backspace to widen)' }
+                Write-ErPickerLine -Width $width -Text ('  search: {0}_{1}' -f $filter, $note)
+                Write-ErPickerLine -Width $width `
+                    -Text '  up/down = move   PgUp/PgDn, Home/End = jump   type = search   Enter = choose   Esc = back'
+            }
+
+            $key = Read-ErKey
+            switch ($key.Key) {
+                # Wrapping at both ends: with a highlight to follow there is no doubt
+                # where it went, and it puts the last item one keystroke away.
+                'UpArrow'   { if ($shown.Count) { $cursor = $(if ($cursor -le 0)                { $shown.Count - 1 } else { $cursor - 1 }) } }
+                'DownArrow' { if ($shown.Count) { $cursor = $(if ($cursor -ge $shown.Count - 1) { 0 }                else { $cursor + 1 }) } }
+                'PageUp'    { $cursor -= $rows }
+                'PageDown'  { $cursor += $rows }
+                'Home'      { $cursor = 0 }
+                'End'       { $cursor = $shown.Count - 1 }
+                'Enter'     { if ($shown.Count) { return $Items[$shown[$cursor]] } }
+                'Escape'    { return $null }
+                'Backspace' {
+                    if ($filter.Length) { $filter = $filter.Substring(0, $filter.Length - 1); $cursor = 0; $top = 0 }
+                }
+                default {
+                    # KeyChar is NUL for the function and arrow keys; 127 is DEL.
+                    $c = $key.KeyChar
+                    if (-not $NoFilter -and [int]$c -ge 32 -and [int]$c -ne 127) {
+                        $filter += $c; $cursor = 0; $top = 0
+                    }
+                }
+            }
+        }
+    }
+    finally {
+        # Wipe the frame on the way out. What was picked is echoed by the caller (and
+        # every write is confirmed on its own line), so leaving the last frame behind
+        # would only fill the scrollback with menus.
+        $w = [Math]::Max(24, [Console]::WindowWidth - 1)
+        [Console]::SetCursorPosition(0, $anchor)
+        for ($i = 0; $i -lt $lines; $i++) { Write-ErPickerLine -Width $w }
+        [Console]::SetCursorPosition(0, $anchor)
+    }
+}
+
+function Select-ErNumberedMenu {
+    <#  The fallback: print a page, type a number. Same answer as the drawn menu, and the
+        same numbers, so the two agree on what "number 214" means.
+
+        Returns the chosen item, or $null for Esc.  #>
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][object[]]$Items,
+        [Parameter(Mandatory)][scriptblock]$Label,
+        [int]$PageSize = 20,
+        [switch]$NoFilter
+    )
+    $labels = @(0..($Items.Count - 1) | ForEach-Object { [string](& $Label $Items[$_]) })
+    $filter = ''
+    $page   = 0
+    while ($true) {
+        $shown = @(0..($Items.Count - 1) | Where-Object { -not $filter -or $labels[$_] -like "*$filter*" })
+        if (-not $shown.Count) {
+            Write-Host ("`n  {0}: nothing matches '{1}'." -f $Title, $filter)
+            $filter = ''; $page = 0
+            continue
+        }
+        $pages = [Math]::Ceiling($shown.Count / $PageSize)
+        if ($page -ge $pages) { $page = 0 }
+        if ($page -lt 0)      { $page = $pages - 1 }
+
+        Write-Host ("`n  {0}  -  {1} item(s){2}  -  page {3}/{4}" -f `
+            $Title, $shown.Count, $(if ($filter) { " matching '$filter'" } else { '' }), ($page + 1), $pages)
+        $from = $page * $PageSize
+        $to   = [Math]::Min($from + $PageSize, $shown.Count) - 1
+        foreach ($k in $from..$to) {
+            Write-Host ("    [{0,4}] {1}" -f $shown[$k], $labels[$shown[$k]])
+        }
+        if ($NoFilter) { Write-Host '    number = pick | Enter = next page | p = previous | Esc = back' }
+        else           { Write-Host '    number = pick | Enter = next page | p = previous | /text = filter | / = clear | Esc = back' }
+
+        $a = Read-ErLine -Prompt '  >'
+        if ($null -eq $a) { return $null }
+        $a = $a.Trim()
+        if ($a -eq '')  { $page++ ; continue }
+        if ($a -eq 'p') { $page-- ; continue }
+        if (-not $NoFilter -and $a.StartsWith('/')) { $filter = $a.Substring(1).Trim(); $page = 0; continue }
+        if ($a -match '^\d+$') {
+            $n = [int]$a
+            if ($shown -contains $n) { return $Items[$n] }
+            Write-Host '    That number is not in the list above (filtered out, or out of range).'
+            continue
+        }
+        if ($NoFilter) { Write-Host '    Not understood - type one of the numbers above.' }
+        else           { Write-Host "    Not understood. To search, start with '/'." }
+    }
+}
+
+function Select-ErItem {
+    <#  Pick one item out of a list: drawn menu where the host allows it, numbered prompt
+        where it does not.
+
+        A host that passes the probe can still fail at the first ReadKey or the first
+        cursor move (a remoted console, a window resized to nothing mid-draw). That is
+        caught here, marked so nothing tries the drawn menu again this run, and the pick
+        is started over on the numbered path. Starting over is safe precisely because the
+        drawn menu returns only on Enter or Esc: a failure before then has chosen nothing.
+
+        Returns the chosen item, or $null for Esc.  #>
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items,
+        [Parameter(Mandatory)][scriptblock]$Label,
+        [int]$PageSize = 20,
+        [switch]$NoFilter
+    )
+    if (-not $Items.Count) { return $null }
+    if (Test-ErRawKeys) {
+        try {
+            return Select-ErDrawnMenu -Title $Title -Items $Items -Label $Label `
+                       -PageSize $PageSize -NoFilter:$NoFilter
+        }
+        catch {
+            $script:ErNoRawKeys = $true
+            Write-Host "`n(this host cannot draw a menu, falling back to numbers: $($_.Exception.Message))"
+        }
+    }
+    Select-ErNumberedMenu -Title $Title -Items $Items -Label $Label -PageSize $PageSize -NoFilter:$NoFilter
+}
+
+function Select-ErOption {
+    <#  Pick-one prompt for a short, fixed set: which save, which character, which menu
+        entry. Non-interactively this throws and lists the options in the message, so the
+        caller learns what to pass instead of hanging.
+
+        Esc returns $null with -AllowEscape, and otherwise cancels the whole run.  #>
     param(
         [Parameter(Mandatory)][string]$Prompt,
         [Parameter(Mandatory)][object[]]$Options,
@@ -603,22 +856,14 @@ function Select-ErOption {
         [switch]$AllowEscape
     )
     if ($Options.Count -eq 1) { return $Options[0] }
-    $labels = @($Options | ForEach-Object { & $Label $_ })
     if (-not (Test-ErInteractive)) {
+        $labels = @($Options | ForEach-Object { & $Label $_ })
         throw ("$Prompt $NonInteractiveHint`n  " + ($labels -join "`n  "))
     }
-    Write-Host "`n$Prompt"
-    for ($i = 0; $i -lt $Options.Count; $i++) { Write-Host ("   [{0}] {1}" -f $i, $labels[$i]) }
-    while ($true) {
-        $a = Read-ErLine -Prompt 'Number'
-        if ($null -eq $a) {
-            if ($AllowEscape) { return $null }
-            throw $script:ErCancelled
-        }
-        $a = $a.Trim()
-        if ($a -match '^\d+$' -and [int]$a -lt $Options.Count) { return $Options[[int]$a] }
-        Write-Host 'Not one of the numbers above.'
-    }
+    # No search box on a menu that already fits on the screen: there is nothing to search.
+    $pick = Select-ErItem -Title $Prompt -Items $Options -Label $Label -PageSize $Options.Count -NoFilter
+    if ($null -eq $pick -and -not $AllowEscape) { throw $script:ErCancelled }
+    $pick
 }
 
 function Assert-ErGameNotRunning {

@@ -30,6 +30,11 @@
   at startup, because a REPL session is long enough for it to be launched halfway through.
 
   Interactive by definition: it refuses to start with stdin redirected rather than hang.
+
+  Every list - the menu, the characters, the 600 items - is the same prompt: arrow keys
+  move the highlight, typing searches, Enter takes what is highlighted, Esc goes back.
+  Where a menu cannot be drawn it falls back to numbered pages by itself; see
+  Select-ErItem in ErProfileLib.ps1.
 .EXAMPLE
   .\Edit-ErSave.ps1
 .EXAMPLE
@@ -182,9 +187,10 @@ function Open-ErSlot {
 function Select-ErFromList {
     <#  Pick one item out of a list that is too long to print.
 
-        The numbers are positions in the WHOLE list, not in the current page, so a given
-        item keeps the same number however the list is filtered or paged. Renumbering per
-        page is how a mis-click edits the wrong sword.
+        Everything about how the picking works lives in Select-ErItem (ErProfileLib):
+        arrow keys and a search box on a real console, a numbered page-at-a-time prompt
+        anywhere else. What stays here is the one case the picker cannot answer, an empty
+        list, which needs a message and an acknowledgement rather than a silent $null.
 
         Returns the chosen item, or $null for Esc.  #>
     param(
@@ -198,44 +204,7 @@ function Select-ErFromList {
         [void](Read-ErLine -Prompt '  (Enter to go back)')
         return $null
     }
-    $labels = @(0..($Items.Count - 1) | ForEach-Object { & $Label $Items[$_] })
-    $filter = ''
-    $page   = 0
-
-    while ($true) {
-        $shown = @(0..($Items.Count - 1) | Where-Object { -not $filter -or $labels[$_] -like "*$filter*" })
-        if (-not $shown.Count) {
-            Write-Host ("`n  {0}: nothing matches '{1}'." -f $Title, $filter)
-            $filter = ''; $page = 0
-            continue
-        }
-        $pages = [Math]::Ceiling($shown.Count / $PageSize)
-        if ($page -ge $pages) { $page = 0 }
-        if ($page -lt 0)      { $page = $pages - 1 }
-
-        Write-Host ("`n  {0}  -  {1} item(s){2}  -  page {3}/{4}" -f `
-            $Title, $shown.Count, $(if ($filter) { " matching '$filter'" } else { '' }), ($page + 1), $pages)
-        $from = $page * $PageSize
-        $to   = [Math]::Min($from + $PageSize, $shown.Count) - 1
-        foreach ($k in $from..$to) {
-            Write-Host ("    [{0,4}] {1}" -f $shown[$k], $labels[$shown[$k]])
-        }
-        Write-Host '    number = pick | Enter = next page | p = previous | /text = filter | / = clear | Esc = back'
-
-        $a = Read-ErLine -Prompt '  >'
-        if ($null -eq $a) { return $null }
-        $a = $a.Trim()
-        if ($a -eq '')          { $page++ ; continue }
-        if ($a -eq 'p')         { $page-- ; continue }
-        if ($a.StartsWith('/')) { $filter = $a.Substring(1).Trim(); $page = 0; continue }
-        if ($a -match '^\d+$') {
-            $n = [int]$a
-            if ($shown -contains $n) { return $Items[$n] }
-            Write-Host '    That number is not in the list above (filtered out, or out of range).'
-            continue
-        }
-        Write-Host "    Not understood. To search, start with '/'."
-    }
+    Select-ErItem -Title $Title -Items $Items -Label $Label -PageSize $PageSize
 }
 
 # ==============================================================================

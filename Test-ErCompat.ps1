@@ -287,6 +287,170 @@ Write-ErTestBE32 $dcx (0x2C + 4) 8                     # data starts 8 past DCA
 $inflated = Expand-ErDcx -Bytes $dcx
 Assert-Er ([Text.Encoding]::ASCII.GetString($inflated) -eq ('erie compatibility ' * 20)) 'zlib payload round-trips'
 
+# --- pick-one prompts -----------------------------------------------------------
+# Both paths are driven by standing in for the one primitive each of them reads through,
+# Read-ErLine and Read-ErKey, so neither test needs a person at a keyboard. Which path is
+# under test is pinned with ErNoRawKeys rather than left to the environment: run from a
+# terminal window the picker would otherwise draw a menu, and the numbered tests would sit
+# there waiting for a keystroke nobody is going to press.
+#
+# The drawn menu still needs a real console to draw on, so it is skipped where there is
+# none (a redirected stdout, which is what CI and a captured transcript look like) rather
+# than reported as a pass that never ran.
+
+$script:erTestLines = @()
+function Read-ErLine {
+    param([string]$Prompt = '>')
+    if (-not $script:erTestLines.Count) { throw 'the test ran out of scripted answers' }
+    $a = $script:erTestLines[0]
+    $script:erTestLines = @($script:erTestLines | Select-Object -Skip 1)
+    $a
+}
+function Set-ErTestLines { $script:erTestLines = @($args) }
+
+$script:erTestKeys = @()
+function Read-ErKey {
+    if (-not $script:erTestKeys.Count) { throw 'the test ran out of scripted keys' }
+    $k = $script:erTestKeys[0]
+    $script:erTestKeys = @($script:erTestKeys | Select-Object -Skip 1)
+    $k
+}
+function Set-ErTestKeys {
+    <#  'Down Down Enter' is three keys; anything that is not a key name is typed one
+        character at a time, which is how the search box gets its input.  #>
+    param([Parameter(Mandatory)][string]$Spec)
+    $named = @{ Down = 'DownArrow'; Up = 'UpArrow'; PgDn = 'PageDown'; PgUp = 'PageUp'
+                Home = 'Home'; End = 'End'; Enter = 'Enter'; Esc = 'Escape'
+                Bksp = 'Backspace'; Right = 'RightArrow' }
+    $keys = @()
+    foreach ($s in $Spec.Split(' ')) {
+        if ($named.ContainsKey($s)) {
+            $keys += New-Object ConsoleKeyInfo ([char]0), ([ConsoleKey]$named[$s]), $false, $false, $false
+        }
+        else {
+            # Virtual key 0 with a character is what a console reports for an ordinary
+            # key, and is what the menu treats as search text.
+            foreach ($c in $s.ToCharArray()) {
+                $keys += New-Object ConsoleKeyInfo $c, ([Enum]::ToObject([ConsoleKey], 0)), $false, $false, $false
+            }
+        }
+    }
+    $script:erTestKeys = @($keys)
+}
+
+$pickItems = @(0..7 | ForEach-Object { [pscustomobject]@{ Name = "Item $_" } })
+$pickItems[7].Name = 'Lhutel the Headless'
+$pickLabel = { param($x) $x.Name }
+
+Write-Host 'pick-one prompts, numbered path (Select-ErNumberedMenu)'
+$script:ErNoRawKeys = $true          # every pick below goes to the numbered path
+
+function Invoke-ErTestPick {
+    param($Items = $pickItems, [int]$Size = 3)
+    # 6>$null: the numbered path prints the page it is asking about, which is the whole
+    # point of it and pure noise in a test transcript.
+    Select-ErItem -Title 'T' -Items $Items -Label $pickLabel -PageSize $Size 6>$null
+}
+
+Set-ErTestLines '/Lhutel' '7'
+Assert-Er ((Invoke-ErTestPick).Name -eq 'Lhutel the Headless') 'a filter then an absolute number picks that item'
+Set-ErTestLines '' '4'
+Assert-Er ((Invoke-ErTestPick).Name -eq 'Item 4') 'paging does not renumber the items'
+Set-ErTestLines '/Lhutel' '2' '7'
+Assert-Er ((Invoke-ErTestPick).Name -eq 'Lhutel the Headless') 'a number filtered off the page is refused, not picked'
+Set-ErTestLines '/nothing' '0'
+Assert-Er ((Invoke-ErTestPick).Name -eq 'Item 0') 'a filter matching nothing clears itself'
+Set-ErTestLines $null
+Assert-Er ($null -eq (Invoke-ErTestPick)) 'Esc picks nothing'
+Assert-Er ($null -eq (Invoke-ErTestPick -Items @())) 'an empty list picks nothing without asking'
+Assert-Er ((Select-ErOption -Prompt 'P' -Options @('only') -Label { param($x) $x }) -eq 'only') 'a single option needs no prompt'
+
+# Which half of Select-ErOption is reachable depends on whether this run can prompt at
+# all, so each is checked where it applies rather than one of them being faked.
+if (Test-ErInteractive) {
+    Set-ErTestLines '1'
+    Assert-Er ((Select-ErOption -Prompt 'P' -Options @('a', 'b') -Label { param($x) $x } 6>$null) -eq 'b') `
+        'Select-ErOption picks through the same list prompt as everything else'
+    Set-ErTestLines $null
+    $escaped = Select-ErOption -Prompt 'P' -Options @('a', 'b') -Label { param($x) $x } -AllowEscape 6>$null
+    Assert-Er ($null -eq $escaped) 'Esc out of Select-ErOption returns null with -AllowEscape'
+    Set-ErTestLines $null
+    $cancelled = $false
+    try { $null = Select-ErOption -Prompt 'P' -Options @('a', 'b') -Label { param($x) $x } 6>$null }
+    catch { $cancelled = $true }
+    Assert-Er $cancelled 'Esc out of Select-ErOption cancels the run without -AllowEscape'
+}
+else {
+    $threw = $false
+    try { $null = Select-ErOption -Prompt 'P' -Options @('a', 'b') -Label { param($x) $x } -NonInteractiveHint 'pass one of:' 6>$null }
+    catch { $threw = ($_.Exception.Message -match 'pass one of:' -and $_.Exception.Message -match 'b') }
+    Assert-Er $threw 'with no way to ask, Select-ErOption throws and lists the options'
+}
+
+Write-Host 'pick-one prompts, drawn menu (Select-ErDrawnMenu)'
+$script:ErNoRawKeys = $false
+if (-not (Test-ErRawKeys)) {
+    Write-Host '  skipped - no console to draw on (run this in a terminal window to cover it)'
+}
+else {
+    $drawn = @(0..29 | ForEach-Object { [pscustomobject]@{ Name = "Item $_" } })
+    $drawn[23].Name = 'Lhutel the Headless'
+    function Invoke-ErTestDraw {
+        param($Items = $drawn, [int]$Size = 8, [string]$Title = 'T')
+        Select-ErDrawnMenu -Title $Title -Items $Items -Label $pickLabel -PageSize $Size
+    }
+
+    Set-ErTestKeys 'Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 0') 'Enter takes the item the highlight starts on'
+    Set-ErTestKeys 'Down Down Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 2') 'the arrow keys move the highlight'
+    Set-ErTestKeys 'Down Right Down Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 2') 'a key the menu does not use moves nothing'
+    Set-ErTestKeys 'Up Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 29') 'up from the first item wraps to the last'
+    Set-ErTestKeys 'End Up Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 28') 'End jumps to the last item'
+    Set-ErTestKeys 'PgDn PgDn PgUp Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 8') 'PgDn and PgUp move by the page'
+    Set-ErTestKeys 'End PgDn Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 29') 'PgDn at the end stays there'
+    Set-ErTestKeys 'PgUp Home Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 0') 'Home returns to the first item'
+    Set-ErTestKeys 'Down Down Down Down Down Down Down Down Down Down Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 10') 'the view scrolls past the page to follow the highlight'
+    Set-ErTestKeys 'headless Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Lhutel the Headless') 'typing searches, case-insensitively and anywhere in the label'
+    Set-ErTestKeys 'Lhutelx Bksp Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Lhutel the Headless') 'Backspace widens the search again'
+    Set-ErTestKeys 'Item Down Enter'
+    Assert-Er ((Invoke-ErTestDraw).Name -eq 'Item 1') 'the highlight starts over when the search changes'
+    Set-ErTestKeys 'zzz Enter Esc'
+    Assert-Er ($null -eq (Invoke-ErTestDraw)) 'Enter picks nothing while nothing matches'
+    Set-ErTestKeys 'Esc'
+    Assert-Er ($null -eq (Invoke-ErTestDraw)) 'Esc picks nothing'
+    Set-ErTestKeys 'Down Down Down Enter'
+    Assert-Er ((Invoke-ErTestDraw -Items @($drawn[0..2])).Name -eq 'Item 0') 'a short list wraps at its own end, not the page end'
+    Set-ErTestKeys 'Enter'
+    Assert-Er ((Invoke-ErTestDraw -Items @($drawn[0])).Name -eq 'Item 0') 'a one-item menu answers'
+    Set-ErTestKeys 'Enter'
+    Assert-Er ((Invoke-ErTestDraw -Size 500).Name -eq 'Item 0') 'a page taller than the window is clamped to it'
+
+    # Where the frame goes matters as much as what it returns: it is wiped on the way out,
+    # and whatever is printed next has to land where the menu started, not on top of it.
+    $before = [Console]::CursorTop
+    Set-ErTestKeys 'Enter'; $null = Invoke-ErTestDraw
+    Assert-Er ([Console]::CursorTop -eq $before) 'the frame is wiped and the cursor returns to where it started'
+    $before = [Console]::CursorTop
+    Set-ErTestKeys 'Esc'; $null = Invoke-ErTestDraw
+    Assert-Er ([Console]::CursorTop -eq $before) 'Esc leaves the cursor where Enter does'
+
+    # At the bottom of the buffer, printing the frame is itself what scrolls, which is why
+    # the menu records where the frame landed only after making room for it.
+    while ([Console]::CursorTop -lt [Console]::BufferHeight - 3) { [Console]::WriteLine() }
+    Set-ErTestKeys 'Down Enter'
+    Assert-Er ((Invoke-ErTestDraw -Title 'BOTTOM').Name -eq 'Item 1') 'a frame drawn at the bottom of the buffer still answers'
+}
+
 # --- verdict ---------------------------------------------------------------------
 
 Write-Host ''

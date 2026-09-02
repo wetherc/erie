@@ -156,7 +156,9 @@ Options: `-MaxWeaponLevel <n>` caps the result further ("no higher than", if you
 .\Edit-ErSave.ps1 -Save ER0000.cnv -Character Frieren
 ```
 
-I hate PowerShell, so we got an interactive tool that lets me pretend this is written with literally any other framework. Pick a character, then weapons (set level), spirit ashes (set level), consumables (set quantity) or runes (set the count in hand). Item lists are paginated and can be filtered: Enter advances to the next page, `p` returns to the previous page, `/text` filters the list, `/` on its own clears the filter, Esc goes back. Quit from the menu, or press Esc there.
+I hate PowerShell, so we got an interactive tool that lets me pretend this is written with literally any other framework. Pick a character, then weapons (set level), spirit ashes (set level), consumables (set quantity) or runes (set the count in hand). Every list works the same way: the up and down arrows move the highlight, PgUp/PgDn and Home/End jump around, typing anything searches as you type, Backspace deletes a letter of the search, Enter takes the highlighted item and Esc goes back. Quit from the menu, or press Esc there.
+
+If you are somewhere that cannot draw a menu — the ISE, or with the output piped to a file — it falls back to the old numbered lists on its own: type the number to pick, Enter for the next page, `p` for the previous one, `/text` to filter, `/` to clear the filter, Esc to go back. The numbers next to items are positions in the whole list, not the page, so they mean the same thing before and after a search either way.
 
 The header above the menu shows the selected character's level, runes in hand and rune memory. Raising rune memory alongside the runes is offered as its own confirmation, because every write in here is one confirmed value.
 
