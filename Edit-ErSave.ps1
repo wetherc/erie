@@ -35,6 +35,17 @@
   move the highlight, typing searches, Enter takes what is highlighted, Esc goes back.
   Where a menu cannot be drawn it falls back to numbered pages by itself; see
   Select-ErItem in ErProfileLib.ps1.
+
+  IN BULK. On the three item lists, Tab ticks rows (Ctrl+A ticks everything the search
+  shows) and Enter takes all of them. One value is then asked for and applied to the lot:
+  a quantity for goods, a level for weapons and ashes, with each weapon and each ash
+  clamped to its own ceiling rather than the whole thing being refused because one of
+  them cannot go that high. What cannot take the value at all is reported and left alone.
+
+  A bulk edit is ONE plan, ONE confirmation and ONE write: the plan is printed, every
+  offset is checked to still hold what the plan was built from, and if any one of them
+  does not, nothing at all is written. A half-applied bulk edit is the outcome worth
+  going out of the way to avoid.
 .EXAMPLE
   .\Edit-ErSave.ps1
 .EXAMPLE
@@ -60,9 +71,9 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\ERSaveLib.ps1"
 . "$PSScriptRoot\ErProfileLib.ps1"
 
-# One backup per session, taken lazily before the first write. Held here rather than
-# passed around because "have we backed up yet" is a property of the run, not of a write.
-$script:ErBackup = $null
+# The write path itself - the plan, the one confirmation, the backup, the read-back - is
+# Invoke-ErSaveWriteBatch in ErProfileLib.ps1, along with $script:ErBackup. What is left
+# here is which items to write and what to put in them.
 
 # ==============================================================================
 #  Reading a character's editable items
@@ -192,173 +203,187 @@ function Select-ErFromList {
         anywhere else. What stays here is the one case the picker cannot answer, an empty
         list, which needs a message and an acknowledgement rather than a silent $null.
 
-        Returns the chosen item, or $null for Esc.  #>
+        Returns the chosen item, or $null for Esc. With -Multi it returns an array of
+        items instead, still $null for Esc.  #>
     param(
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items,
         [Parameter(Mandatory)][scriptblock]$Label,
-        [int]$PageSize = 20
+        [int]$PageSize = 20,
+        [switch]$Multi
     )
     if (-not $Items.Count) {
         Write-Host "`n  $Title - none held."
         [void](Read-ErLine -Prompt '  (Enter to go back)')
         return $null
     }
-    Select-ErItem -Title $Title -Items $Items -Label $Label -PageSize $PageSize
+    Select-ErItem -Title $Title -Items $Items -Label $Label -PageSize $PageSize -Multi:$Multi
 }
 
 # ==============================================================================
 #  Writing
 # ==============================================================================
 
-function Invoke-ErSaveWrite {
-    <#  Confirm, back up, write four bytes, and prove it landed.
-
-        Proving it means re-reading the file from disk and checking both the value at the
-        offset and EVERY entry checksum: a good checksum on the edited slot says nothing
-        about whether the write went where it was meant to go.
-
-        A failed verification stops the session rather than returning: continuing to edit
-        a file that did not come back as expected is how one bad write becomes five.
-
-        Returns $true if written, $false if the user declined.  #>
-    param(
-        [Parameter(Mandatory)]$Session,
-        [Parameter(Mandatory)][byte[]]$Bytes,
-        [Parameter(Mandatory)]$Entry,
-        [Parameter(Mandatory)][int]$Offset,
-        [Parameter(Mandatory)][uint32]$Old,
-        [Parameter(Mandatory)][uint32]$New,
-        [Parameter(Mandatory)][string]$Label
-    )
-    # Not just at startup: a REPL session lasts long enough for the game to be launched
-    # halfway through, and anything written while it runs is discarded when it quits.
-    Assert-ErGameNotRunning
-
-    $cur = [BitConverter]::ToUInt32($Bytes, $Offset)
-    if ($cur -ne $Old) {
-        throw ("Offset 0x{0:x} holds {1}, expected {2} - refusing to write. The in-memory view no longer matches the file." -f $Offset, $cur, $Old)
-    }
-
-    Write-Host ("`n  WRITE  {0}" -f $Label)
-    Write-Host ("         0x{0:x}  {1} -> {2}" -f $Offset, $Old, $New)
-    if (-not (Read-ErYesNo -Question '  Apply this?')) {
-        Write-Host '  Left alone.'
-        return $false
-    }
-
-    if (-not $script:ErBackup) {
-        $script:ErBackup = "$($Session.SavePath).bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
-        Copy-Item -LiteralPath $Session.SavePath -Destination $script:ErBackup
-        Write-Host "  Backup -> $script:ErBackup"
-    }
-
-    [Array]::Copy([BitConverter]::GetBytes($New), 0, $Bytes, $Offset, 4)
-    Update-ErChecksum -Bytes $Bytes -Entry $Entry
-    [IO.File]::WriteAllBytes($Session.SavePath, $Bytes)
-
-    $back = [IO.File]::ReadAllBytes($Session.SavePath)
-    $got  = [BitConverter]::ToUInt32($back, $Offset)
-    if ($got -ne $New) {
-        throw ("VERIFY FAILED: 0x{0:x} reads {1} after writing {2}. Restore from {3}." -f $Offset, $got, $New, $script:ErBackup)
-    }
-    $entries = @(Get-ErEntries -Bytes $back)
-    $bad = @($entries | Where-Object { -not (Test-ErChecksum -Bytes $back -Entry $_) })
-    if ($bad.Count) {
-        throw ("VERIFY FAILED: bad checksum on {0}. Restore from {1}." -f (($bad | ForEach-Object { $_.Name }) -join ', '), $script:ErBackup)
-    }
-    Write-Host ("  Written and verified ({0} entry checksums ok)." -f $entries.Count)
-    $true
-}
-
-# ==============================================================================
-#  Actions
-# ==============================================================================
-
 function Invoke-ErWeaponAction {
+    <#  Set the reinforcement level on one weapon or on a whole tick-list of them.
+
+        One level is asked for, and each weapon takes as much of it as ITS OWN ceiling
+        allows. That is the only sensible reading of "+25 on these twelve" when a somber
+        weapon stops at +10, and it makes "everything as high as it goes" the same
+        operation as any other: ask for the highest level on offer.  #>
     param($Session, [byte[]]$Bytes, $State, $Prof, $Vanilla, [int]$PageSize)
 
-    $w = Select-ErFromList -Title 'WEAPONS' -Items $State.Weapons -PageSize $PageSize -Label {
+    $picked = Get-ErPicked (Select-ErFromList -Title 'WEAPONS' -Items $State.Weapons -PageSize $PageSize -Multi -Label {
         param($x)
         $cap = if ($null -ne $x.MaxLevel) { "/$($x.MaxLevel)" } else { '/?' }
         '{0,-38} +{1}{2,-5} a{3}  id {4}' -f `
             $x.Display, $x.Level, $cap, $x.Array, $x.ParamId
-    }
-    if ($null -eq $w) { return }
+    })
+    if (-not $picked.Count) { return }
 
-    if (-not $w.Upgradeable) {
-        # MaxLevel null and MaxLevel 0 are different answers: "this build has no such
-        # weapon" versus "this weapon has no reinforcement path". Say which.
-        if ($null -eq $w.MaxLevel) {
-            Write-Host ("  {0} (id {1}) is not defined by the {2} build at all - nothing written here could be trusted to load." -f $w.Display, $w.BaseId, $Prof.Name)
-        } else {
-            Write-Host ("  {0} does not reinforce in the {1} build (ceiling +0) - a level on it would be a param id with no matching row." -f $w.Display, $Prof.Name)
+    # Work out what each one can actually take before asking for anything, so the prompt
+    # can offer a range that means something and the refusals are all reported together.
+    $usable  = New-Object Collections.ArrayList
+    $reasons = New-Object Collections.ArrayList
+    foreach ($w in $picked) {
+        if (-not $w.Upgradeable) {
+            # MaxLevel null and MaxLevel 0 are different answers: "this build has no such
+            # weapon" versus "this weapon has no reinforcement path". Say which.
+            if ($null -eq $w.MaxLevel) {
+                [void]$reasons.Add(('{0} (id {1}) is not defined by the {2} build at all - nothing written here could be trusted to load' -f $w.Display, $w.BaseId, $Prof.Name))
+            } else {
+                [void]$reasons.Add(('{0} does not reinforce in the {1} build (ceiling +0)' -f $w.Display, $Prof.Name))
+            }
+            continue
         }
-        return
+        if ($Vanilla -and -not (Test-ErItemExists -Profile $Vanilla -Family Weapon -Id $w.BaseId)) {
+            [void]$reasons.Add(('{0} (id {1}) is not a base-game weapon - refused under -BaseGame' -f $w.Display, $w.BaseId))
+            continue
+        }
+        $cap = Get-ErWeaponCeiling -Profile $Prof -BaseId $w.BaseId -BaseGameProfile $Vanilla
+        if ($cap -le 0) {
+            [void]$reasons.Add(('{0} has no reinforcement level available under the current rules' -f $w.Display))
+            continue
+        }
+        [void]$usable.Add([pscustomobject]@{ W = $w; Cap = $cap })
     }
-    if ($Vanilla -and -not (Test-ErItemExists -Profile $Vanilla -Family Weapon -Id $w.BaseId)) {
-        Write-Host ("  {0} (id {1}) is not a base-game weapon - refused under -BaseGame. No level survives the mod being removed if the weapon does not." -f $w.Display, $w.BaseId)
-        return
-    }
+    Write-ErLeftAlone -Reasons @($reasons)
+    if (-not $usable.Count) { return }
 
-    $cap = Get-ErWeaponCeiling -Profile $Prof -BaseId $w.BaseId -BaseGameProfile $Vanilla
-    if ($cap -le 0) {
-        Write-Host ("  {0} has no reinforcement level available under the current rules." -f $w.Display)
-        return
+    $capMax = ($usable | ForEach-Object { $_.Cap } | Measure-Object -Maximum).Maximum
+    if ($usable.Count -eq 1) {
+        $w = $usable[0].W
+        if ($Vanilla -and $capMax -lt $w.MaxLevel) {
+            Write-Host ("  ceiling +{0} under -BaseGame ({1} would allow +{2})." -f $capMax, $Prof.Name, $w.MaxLevel)
+        }
+        $prompt = "  Level for '{0}' (now +{1})" -f $w.Display, $w.Level
     }
-    if ($Vanilla -and $cap -lt $w.MaxLevel) {
-        Write-Host ("  ceiling +{0} under -BaseGame ({1} would allow +{2})." -f $cap, $Prof.Name, $w.MaxLevel)
+    else {
+        Write-Host ("`n  {0} weapon(s) selected; each is clamped to its own ceiling, the highest here being +{1}." -f $usable.Count, $capMax)
+        $prompt = '  Level for all {0}' -f $usable.Count
     }
-
-    $lvl = Read-ErInt -Prompt ("  Level for '{0}' (now +{1})" -f $w.Display, $w.Level) -Min 0 -Max $cap
+    $lvl = Read-ErInt -Prompt $prompt -Min 0 -Max $capMax
     if ($null -eq $lvl) { return }
-    if ($lvl -eq $w.Level) { Write-Host '  Already at that level.'; return }
 
-    $new = [uint32]($w.BaseId + $lvl)
-    $ok = Invoke-ErSaveWrite -Session $Session -Bytes $Bytes -Entry $State.Char.Entry `
-              -Offset ($w.GaOffset + 4) -Old ([uint32]$w.ParamId) -New $new `
-              -Label ('{0}  +{1} -> +{2}' -f $w.Display, $w.Level, $lvl)
-    if ($ok) { $w.ParamId = $new; $w.Level = $lvl }
+    $edits   = New-Object Collections.ArrayList
+    $targets = New-Object Collections.ArrayList
+    $skipped = New-Object Collections.ArrayList
+    foreach ($u in $usable) {
+        $w   = $u.W
+        $tgt = [Math]::Min($lvl, $u.Cap)
+        if ($tgt -eq $w.Level) {
+            [void]$skipped.Add(('{0} is already +{1}' -f $w.Display, $w.Level))
+            continue
+        }
+        $note = if ($tgt -lt $lvl) { ' (its ceiling)' } else { '' }
+        [void]$targets.Add([pscustomobject]@{ W = $w; Level = $tgt })
+        [void]$edits.Add((New-ErEdit -Offset ($w.GaOffset + 4) -Old ([uint32]$w.ParamId) `
+            -New ([uint32]($w.BaseId + $tgt)) -Label ('{0}  +{1} -> +{2}{3}' -f $w.Display, $w.Level, $tgt, $note)))
+    }
+    Write-ErLeftAlone -Reasons @($skipped)
+    if (-not $edits.Count) { return }
+
+    if (Invoke-ErSaveWriteBatch -Session $Session -Bytes $Bytes -Entry $State.Char.Entry -Edits @($edits)) {
+        foreach ($t in $targets) {
+            $t.W.ParamId = [uint32]($t.W.BaseId + $t.Level)
+            $t.W.Level   = $t.Level
+        }
+    }
 }
 
 function Invoke-ErAshAction {
+    <#  Set the level on one spirit ash or on a whole tick-list of them. As with weapons,
+        one level is asked for and each ash takes as much of it as its own ladder holds.  #>
     param($Session, [byte[]]$Bytes, $State, $Prof, $Vanilla, [int]$PageSize)
 
-    $a = Select-ErFromList -Title 'SPIRIT ASHES' -Items $State.Ashes -PageSize $PageSize -Label {
+    $picked = Get-ErPicked (Select-ErFromList -Title 'SPIRIT ASHES' -Items $State.Ashes -PageSize $PageSize -Multi -Label {
         param($x) '{0,-38} +{1}/{2,-4} a{3}  id {4}' -f $x.Family, $x.Level, $x.MaxLevel, $x.Array, $x.ItemId
+    })
+    if (-not $picked.Count) { return }
+
+    $usable  = New-Object Collections.ArrayList
+    $reasons = New-Object Collections.ArrayList
+    foreach ($a in $picked) {
+        if (-not $State.Ladders.ContainsKey($a.Family)) {
+            [void]$reasons.Add(('{0} has no ladder in this build' -f $a.Family))
+            continue
+        }
+        [void]$usable.Add($a)
     }
-    if ($null -eq $a) { return }
+    Write-ErLeftAlone -Reasons @($reasons)
+    if (-not $usable.Count) { return }
 
-    if (-not $State.Ladders.ContainsKey($a.Family)) { Write-Host '  No ladder for that ash.'; return }
-    $ladder = $State.Ladders[$a.Family]
-    # The ladder is read out of the name table, one entry per level, so a level this
-    # build simply does not define is absent here too. Never step the id arithmetically:
-    # flasks and pots also carry "+N" names but step by 2.
-    $levels = @($ladder.ByLevel.Keys | Sort-Object)
-    Write-Host ("  '{0}' has levels: {1}" -f $a.Family, ($levels -join ', '))
-
-    $lvl = Read-ErInt -Prompt ("  Level for '{0}' (now +{1})" -f $a.Family, $a.Level) -Min $levels[0] -Max $levels[-1]
+    $capMax = ($usable | ForEach-Object { $State.Ladders[$_.Family].Max } | Measure-Object -Maximum).Maximum
+    if ($usable.Count -eq 1) {
+        $a = $usable[0]
+        # The ladder is read out of the name table, one entry per level, so a level this
+        # build simply does not define is absent here too. Never step the id
+        # arithmetically: flasks also carry "+N" names but step by 2.
+        $levels = @($State.Ladders[$a.Family].ByLevel.Keys | Sort-Object)
+        Write-Host ("  '{0}' has levels: {1}" -f $a.Family, ($levels -join ', '))
+        $prompt = "  Level for '{0}' (now +{1})" -f $a.Family, $a.Level
+    }
+    else {
+        Write-Host ("`n  {0} spirit ash(es) selected; each is clamped to the top of its own ladder, the highest here being +{1}." -f $usable.Count, $capMax)
+        $prompt = '  Level for all {0}' -f $usable.Count
+    }
+    $lvl = Read-ErInt -Prompt $prompt -Min 0 -Max $capMax
     if ($null -eq $lvl) { return }
-    if (-not $ladder.ByLevel.ContainsKey($lvl)) {
-        Write-Host ("  The {0} build defines no '{1} +{2}'." -f $Prof.Name, $a.Family, $lvl)
-        return
-    }
-    if ($lvl -eq $a.Level) { Write-Host '  Already at that level.'; return }
 
-    $newId = [int]$ladder.ByLevel[$lvl]
-    if ($Vanilla -and -not (Test-ErItemExists -Profile $Vanilla -Family Goods -Id $newId)) {
-        Write-Host ("  '{0} +{1}' (id {2}) does not exist in the base game - refused under -BaseGame." -f $a.Family, $lvl, $newId)
-        return
+    $edits   = New-Object Collections.ArrayList
+    $targets = New-Object Collections.ArrayList
+    $skipped = New-Object Collections.ArrayList
+    foreach ($a in $usable) {
+        $ladder = $State.Ladders[$a.Family]
+        $tgt    = [Math]::Min($lvl, $ladder.Max)
+        if (-not $ladder.ByLevel.ContainsKey($tgt)) {
+            [void]$skipped.Add(("the {0} build defines no '{1} +{2}'" -f $Prof.Name, $a.Family, $tgt))
+            continue
+        }
+        if ($tgt -eq $a.Level) {
+            [void]$skipped.Add(('{0} is already +{1}' -f $a.Family, $a.Level))
+            continue
+        }
+        $newId = [int]$ladder.ByLevel[$tgt]
+        if ($Vanilla -and -not (Test-ErItemExists -Profile $Vanilla -Family Goods -Id $newId)) {
+            [void]$skipped.Add(("'{0} +{1}' (id {2}) does not exist in the base game - refused under -BaseGame" -f $a.Family, $tgt, $newId))
+            continue
+        }
+        $note = if ($tgt -lt $lvl) { ' (top of its ladder)' } else { '' }
+        [void]$targets.Add([pscustomobject]@{ A = $a; Level = $tgt; Id = $newId })
+        # A spirit ash is a good, so its level lives in the id carried by the handle.
+        [void]$edits.Add((New-ErEdit -Offset $a.Offset -Old ([uint32](2952790016 + $a.ItemId)) `
+            -New ([uint32](2952790016 + $newId)) -Label ('{0}  +{1} -> +{2}{3}' -f $a.Family, $a.Level, $tgt, $note)))
     }
+    Write-ErLeftAlone -Reasons @($skipped)
+    if (-not $edits.Count) { return }
 
-    # A spirit ash is a good, so its level lives in the id carried by the handle itself.
-    $ok = Invoke-ErSaveWrite -Session $Session -Bytes $Bytes -Entry $State.Char.Entry `
-              -Offset $a.Offset -Old ([uint32](2952790016 + $a.ItemId)) -New ([uint32](2952790016 + $newId)) `
-              -Label ('{0}  +{1} -> +{2}' -f $a.Family, $a.Level, $lvl)
-    if ($ok) {
-        $a.ItemId = $newId
-        $a.Level  = $lvl
-        $a.Name   = $(if ($State.GoodsN.ContainsKey($newId)) { $State.GoodsN[$newId] } else { $a.Name })
+    if (Invoke-ErSaveWriteBatch -Session $Session -Bytes $Bytes -Entry $State.Char.Entry -Edits @($edits)) {
+        foreach ($t in $targets) {
+            $t.A.ItemId = $t.Id
+            $t.A.Level  = $t.Level
+            $t.A.Name   = $(if ($State.GoodsN.ContainsKey($t.Id)) { $State.GoodsN[$t.Id] } else { $t.A.Name })
+        }
     }
 }
 
@@ -403,31 +428,57 @@ function Invoke-ErRunesAction {
 }
 
 function Invoke-ErGoodsAction {
+    <#  Set the stack quantity on one goods record or on a whole tick-list of them. One
+        quantity applies to all of them: "999 of each of these forty" is the thing worth
+        doing in bulk, and a per-item quantity in bulk would just be the serial edit
+        again with more steps.  #>
     param($Session, [byte[]]$Bytes, $State, $Prof, $Vanilla, [int]$PageSize)
 
-    $g = Select-ErFromList -Title 'GOODS (key items and upgrade materials included)' `
-             -Items $State.Goods -PageSize $PageSize -Label {
+    $picked = Get-ErPicked (Select-ErFromList -Title 'GOODS (key items and upgrade materials included)' `
+             -Items $State.Goods -PageSize $PageSize -Multi -Label {
         param($x) '{0,-38} x{1,-5} a{2}  id {3}' -f `
             $x.Display, $x.Quantity, $x.Array, $x.ItemId
-    }
-    if ($null -eq $g) { return }
+    })
+    if (-not $picked.Count) { return }
 
-    if ($Vanilla -and -not (Test-ErItemExists -Profile $Vanilla -Family Goods -Id $g.ItemId)) {
-        # Existence is asked of the param tables, never of the name: a mod leaves stale
-        # vanilla names on ids the base game never defined.
-        Write-Host ("  id {0} does not exist in the base game - refused under -BaseGame." -f $g.ItemId)
-        return
+    $usable  = New-Object Collections.ArrayList
+    $reasons = New-Object Collections.ArrayList
+    foreach ($g in $picked) {
+        if ($Vanilla -and -not (Test-ErItemExists -Profile $Vanilla -Family Goods -Id $g.ItemId)) {
+            # Existence is asked of the param tables, never of the name: a mod leaves
+            # stale vanilla names on ids the base game never defined.
+            [void]$reasons.Add(('{0} (id {1}) does not exist in the base game - refused under -BaseGame' -f $g.Display, $g.ItemId))
+            continue
+        }
+        [void]$usable.Add($g)
     }
+    Write-ErLeftAlone -Reasons @($reasons)
+    if (-not $usable.Count) { return }
 
-    $q = Read-ErInt -Prompt ("  Quantity for '{0}' (now {1})" -f $g.Display, $g.Quantity) -Min 1 -Max 999
+    $prompt = if ($usable.Count -eq 1) { "  Quantity for '{0}' (now {1})" -f $usable[0].Display, $usable[0].Quantity }
+              else                     { '  Quantity for all {0} selected record(s)' -f $usable.Count }
+    $q = Read-ErInt -Prompt $prompt -Min 1 -Max 999
     if ($null -eq $q) { return }
-    if ($q -eq $g.Quantity) { Write-Host '  Already at that quantity.'; return }
 
-    # Quantity always sits at handle+4, so this offset is phase-independent.
-    $ok = Invoke-ErSaveWrite -Session $Session -Bytes $Bytes -Entry $State.Char.Entry `
-              -Offset ($g.Offset + 4) -Old ([uint32]$g.Quantity) -New ([uint32]$q) `
-              -Label ('{0}  x{1} -> x{2}' -f $g.Display, $g.Quantity, $q)
-    if ($ok) { $g.Quantity = $q }
+    $edits   = New-Object Collections.ArrayList
+    $targets = New-Object Collections.ArrayList
+    $skipped = New-Object Collections.ArrayList
+    foreach ($g in $usable) {
+        if ($q -eq $g.Quantity) {
+            [void]$skipped.Add(('{0} is already x{1}' -f $g.Display, $g.Quantity))
+            continue
+        }
+        [void]$targets.Add($g)
+        # Quantity always sits at handle+4, so this offset is phase-independent.
+        [void]$edits.Add((New-ErEdit -Offset ($g.Offset + 4) -Old ([uint32]$g.Quantity) -New ([uint32]$q) `
+            -Label ('{0}  x{1} -> x{2}' -f $g.Display, $g.Quantity, $q)))
+    }
+    Write-ErLeftAlone -Reasons @($skipped)
+    if (-not $edits.Count) { return }
+
+    if (Invoke-ErSaveWriteBatch -Session $Session -Bytes $Bytes -Entry $State.Char.Entry -Edits @($edits)) {
+        foreach ($g in $targets) { $g.Quantity = $q }
+    }
 }
 
 # ==============================================================================
@@ -452,9 +503,9 @@ if ($null -eq $state) {
 }
 
 $menu = @(
-    [pscustomobject]@{ Key = 'weapon'; Text = 'Weapons - set reinforcement level' }
-    [pscustomobject]@{ Key = 'ash';    Text = 'Spirit ashes - set level' }
-    [pscustomobject]@{ Key = 'goods';  Text = 'Goods - set stack quantity (key items and upgrade materials included)' }
+    [pscustomobject]@{ Key = 'weapon'; Text = 'Weapons - set reinforcement level (one or many)' }
+    [pscustomobject]@{ Key = 'ash';    Text = 'Spirit ashes - set level (one or many)' }
+    [pscustomobject]@{ Key = 'goods';  Text = 'Goods - set stack quantity, one or many (key items and upgrade materials included)' }
     [pscustomobject]@{ Key = 'runes';  Text = 'Runes - set the count carried in hand' }
     [pscustomobject]@{ Key = 'char';   Text = 'Change character' }
     [pscustomobject]@{ Key = 'quit';   Text = 'Quit' }

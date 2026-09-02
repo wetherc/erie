@@ -656,7 +656,8 @@ function Write-ErPickerLine {
 }
 
 function Select-ErDrawnMenu {
-    <#  The drawn menu. Returns the chosen item, or $null for Esc.
+    <#  The drawn menu. Returns the chosen item, or $null for Esc. With -Multi it returns
+        an ARRAY of the ticked items instead, still $null for Esc.
 
         The frame is a fixed number of rows for the life of the call - short lists and
         filtered-away rows are padded with blanks - because a frame that changed height
@@ -667,13 +668,19 @@ function Select-ErDrawnMenu {
         position recorded before that would point one row too high for the rest of the
         session.
 
+        Ticks are kept against positions in the whole list, not the filtered view, so a
+        search can be narrowed, ticked, cleared and narrowed again and the earlier ticks
+        are all still there. Tab ticks rather than Space: an item name has spaces in it,
+        and typing one has to reach the search box.
+
         Throws whatever the console throws; Select-ErItem catches and falls back.  #>
     param(
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][object[]]$Items,
         [Parameter(Mandatory)][scriptblock]$Label,
         [int]$PageSize = 20,
-        [switch]$NoFilter
+        [switch]$NoFilter,
+        [switch]$Multi
     )
     $labels = @(0..($Items.Count - 1) | ForEach-Object { [string](& $Label $Items[$_]) })
     $rows   = [Math]::Max(1, [Math]::Min($PageSize, [Math]::Min($Items.Count, [Console]::WindowHeight - 6)))
@@ -681,6 +688,7 @@ function Select-ErDrawnMenu {
     $filter = ''
     $cursor = 0
     $top    = 0
+    $ticked = @{}                             # position in $Items -> ticked
 
     for ($i = 0; $i -lt $lines; $i++) { [Console]::WriteLine() }
     $anchor = [Console]::CursorTop - $lines
@@ -701,14 +709,18 @@ function Select-ErDrawnMenu {
             [Console]::SetCursorPosition(0, $anchor)
             $count = if ($filter) { '{0} of {1} shown' -f $shown.Count, $Items.Count }
                      else         { '{0} item(s)' -f $Items.Count }
+            if ($Multi) { $count += '   {0} ticked' -f $ticked.Count }
             Write-ErPickerLine -Width $width -Text ('  {0}  -  {1}' -f $Title, $count)
             for ($r = 0; $r -lt $rows; $r++) {
                 $k = $top + $r
                 if ($k -ge $shown.Count) { Write-ErPickerLine -Width $width; continue }
                 $n   = $shown[$k]
                 $sel = ($k -eq $cursor)
+                $box = if (-not $Multi)             { '' }
+                       elseif ($ticked.ContainsKey($n)) { '[*] ' }
+                       else                             { '[ ] ' }
                 Write-ErPickerLine -Width $width -Selected:$sel `
-                    -Text ('{0} [{1,4}] {2}' -f $(if ($sel) { '>' } else { ' ' }), $n, $labels[$n])
+                    -Text ('{0} {1}[{2,4}] {3}' -f $(if ($sel) { '>' } else { ' ' }), $box, $n, $labels[$n])
             }
             if ($NoFilter) {
                 Write-ErPickerLine -Width $width
@@ -717,8 +729,14 @@ function Select-ErDrawnMenu {
             else {
                 $note = if ($shown.Count) { '' } else { '   (nothing matches - Backspace to widen)' }
                 Write-ErPickerLine -Width $width -Text ('  search: {0}_{1}' -f $filter, $note)
-                Write-ErPickerLine -Width $width `
-                    -Text '  up/down = move   PgUp/PgDn, Home/End = jump   type = search   Enter = choose   Esc = back'
+                if ($Multi) {
+                    Write-ErPickerLine -Width $width `
+                        -Text '  up/down = move   Tab = tick   Ctrl+A/Ctrl+D = tick all shown/none   type = search   Enter = take the ticked   Esc = back'
+                }
+                else {
+                    Write-ErPickerLine -Width $width `
+                        -Text '  up/down = move   PgUp/PgDn, Home/End = jump   type = search   Enter = choose   Esc = back'
+                }
             }
 
             $key = Read-ErKey
@@ -731,15 +749,48 @@ function Select-ErDrawnMenu {
                 'PageDown'  { $cursor += $rows }
                 'Home'      { $cursor = 0 }
                 'End'       { $cursor = $shown.Count - 1 }
-                'Enter'     { if ($shown.Count) { return $Items[$shown[$cursor]] } }
+                'Enter'     {
+                    if (-not $Multi) {
+                        if ($shown.Count) { return $Items[$shown[$cursor]] }
+                    }
+                    elseif ($ticked.Count) {
+                        # List order, not the order they were ticked in: the caller shows
+                        # this back as a plan to confirm, and a plan reads best in the
+                        # same order as the list it came from.
+                        return @($ticked.Keys | Sort-Object | ForEach-Object { $Items[$_] })
+                    }
+                    elseif ($shown.Count) {
+                        # Nothing ticked means Enter behaves like the single-pick menu, so
+                        # picking one item never needs the Tab key at all.
+                        return @($Items[$shown[$cursor]])
+                    }
+                }
+                'Tab' {
+                    if ($Multi -and $shown.Count) {
+                        $n = $shown[$cursor]
+                        if ($ticked.ContainsKey($n)) { [void]$ticked.Remove($n) } else { $ticked[$n] = $true }
+                        # Tick and step on, so a run of adjacent items is Tab Tab Tab.
+                        # Shift+Tab steps the other way, for correcting the one above.
+                        if ($key.Modifiers -band [ConsoleModifiers]::Shift) {
+                            if ($cursor -gt 0) { $cursor-- }
+                        }
+                        elseif ($cursor -lt $shown.Count - 1) { $cursor++ }
+                    }
+                }
                 'Escape'    { return $null }
                 'Backspace' {
                     if ($filter.Length) { $filter = $filter.Substring(0, $filter.Length - 1); $cursor = 0; $top = 0 }
                 }
                 default {
-                    # KeyChar is NUL for the function and arrow keys; 127 is DEL.
+                    # KeyChar is NUL for the function and arrow keys; 127 is DEL. Ctrl
+                    # combinations carry a control character there, below 32, so they
+                    # cannot leak into the search box either way.
                     $c = $key.KeyChar
-                    if (-not $NoFilter -and [int]$c -ge 32 -and [int]$c -ne 127) {
+                    if ($Multi -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+                        if     ($key.Key -eq [ConsoleKey]::A) { foreach ($n in $shown) { $ticked[$n] = $true } }
+                        elseif ($key.Key -eq [ConsoleKey]::D) { $ticked = @{} }
+                    }
+                    elseif (-not $NoFilter -and [int]$c -ge 32 -and [int]$c -ne 127) {
                         $filter += $c; $cursor = 0; $top = 0
                     }
                 }
@@ -761,17 +812,23 @@ function Select-ErNumberedMenu {
     <#  The fallback: print a page, type a number. Same answer as the drawn menu, and the
         same numbers, so the two agree on what "number 214" means.
 
-        Returns the chosen item, or $null for Esc.  #>
+        Returns the chosen item, or $null for Esc. With -Multi a number TICKS that item
+        rather than taking it, "3-9" ticks a run, "*" ticks everything the filter shows,
+        "-" clears every tick and "d" is done; the answer is then an array. The ticks are
+        against positions in the whole list, so they survive paging and filtering exactly
+        as the drawn menu's do.  #>
     param(
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][object[]]$Items,
         [Parameter(Mandatory)][scriptblock]$Label,
         [int]$PageSize = 20,
-        [switch]$NoFilter
+        [switch]$NoFilter,
+        [switch]$Multi
     )
     $labels = @(0..($Items.Count - 1) | ForEach-Object { [string](& $Label $Items[$_]) })
     $filter = ''
     $page   = 0
+    $ticked = @{}
     while ($true) {
         $shown = @(0..($Items.Count - 1) | Where-Object { -not $filter -or $labels[$_] -like "*$filter*" })
         if (-not $shown.Count) {
@@ -783,15 +840,21 @@ function Select-ErNumberedMenu {
         if ($page -ge $pages) { $page = 0 }
         if ($page -lt 0)      { $page = $pages - 1 }
 
-        Write-Host ("`n  {0}  -  {1} item(s){2}  -  page {3}/{4}" -f `
-            $Title, $shown.Count, $(if ($filter) { " matching '$filter'" } else { '' }), ($page + 1), $pages)
+        Write-Host ("`n  {0}  -  {1} item(s){2}  -  page {3}/{4}{5}" -f `
+            $Title, $shown.Count, $(if ($filter) { " matching '$filter'" } else { '' }), ($page + 1), $pages,
+            $(if ($Multi) { "  -  {0} ticked" -f $ticked.Count } else { '' }))
         $from = $page * $PageSize
         $to   = [Math]::Min($from + $PageSize, $shown.Count) - 1
         foreach ($k in $from..$to) {
-            Write-Host ("    [{0,4}] {1}" -f $shown[$k], $labels[$shown[$k]])
+            $n = $shown[$k]
+            $box = if (-not $Multi) { '' } elseif ($ticked.ContainsKey($n)) { '[*] ' } else { '[ ] ' }
+            Write-Host ("    {0}[{1,4}] {2}" -f $box, $n, $labels[$n])
         }
-        if ($NoFilter) { Write-Host '    number = pick | Enter = next page | p = previous | Esc = back' }
-        else           { Write-Host '    number = pick | Enter = next page | p = previous | /text = filter | / = clear | Esc = back' }
+        if ($Multi) {
+            Write-Host '    number or 3-9 = tick | * = tick all shown | - = clear | d = done | Enter = next page | p = previous | /text = filter | Esc = back'
+        }
+        elseif ($NoFilter) { Write-Host '    number = pick | Enter = next page | p = previous | Esc = back' }
+        else               { Write-Host '    number = pick | Enter = next page | p = previous | /text = filter | / = clear | Esc = back' }
 
         $a = Read-ErLine -Prompt '  >'
         if ($null -eq $a) { return $null }
@@ -799,10 +862,39 @@ function Select-ErNumberedMenu {
         if ($a -eq '')  { $page++ ; continue }
         if ($a -eq 'p') { $page-- ; continue }
         if (-not $NoFilter -and $a.StartsWith('/')) { $filter = $a.Substring(1).Trim(); $page = 0; continue }
-        if ($a -match '^\d+$') {
+        if (-not $Multi -and $a -match '^\d+$') {
             $n = [int]$a
             if ($shown -contains $n) { return $Items[$n] }
             Write-Host '    That number is not in the list above (filtered out, or out of range).'
+            continue
+        }
+        if ($Multi) {
+            if ($a -eq 'd') {
+                if ($ticked.Count) { return @($ticked.Keys | Sort-Object | ForEach-Object { $Items[$_] }) }
+                Write-Host '    Nothing is ticked yet. Type a number to tick one, or Esc to go back.'
+                continue
+            }
+            if ($a -eq '*') { foreach ($n in $shown) { $ticked[$n] = $true }; continue }
+            if ($a -eq '-') { $ticked = @{}; continue }
+            if ($a -match '^(\d+)\s*-\s*(\d+)$') {
+                $lo = [int]$Matches[1]; $hi = [int]$Matches[2]
+                if ($lo -gt $hi) { $t = $lo; $lo = $hi; $hi = $t }
+                # A range means "these of the ones I can see": numbers the filter has
+                # hidden are not silently swept in with them.
+                $hit = @($shown | Where-Object { $_ -ge $lo -and $_ -le $hi })
+                if (-not $hit.Count) { Write-Host '    Nothing in the list above falls in that range.'; continue }
+                foreach ($n in $hit) { if ($ticked.ContainsKey($n)) { [void]$ticked.Remove($n) } else { $ticked[$n] = $true } }
+                continue
+            }
+            if ($a -match '^\d+$') {
+                $n = [int]$a
+                if ($shown -contains $n) {
+                    if ($ticked.ContainsKey($n)) { [void]$ticked.Remove($n) } else { $ticked[$n] = $true }
+                }
+                else { Write-Host '    That number is not in the list above (filtered out, or out of range).' }
+                continue
+            }
+            Write-Host "    Not understood. Numbers tick, 'd' is done, Esc goes back."
             continue
         }
         if ($NoFilter) { Write-Host '    Not understood - type one of the numbers above.' }
@@ -820,26 +912,32 @@ function Select-ErItem {
         is started over on the numbered path. Starting over is safe precisely because the
         drawn menu returns only on Enter or Esc: a failure before then has chosen nothing.
 
-        Returns the chosen item, or $null for Esc.  #>
+        Returns the chosen item, or $null for Esc. With -Multi the answer is an ARRAY of
+        items instead - never an empty one, since a pick with nothing ticked takes the
+        item under the cursor - and still $null for Esc. Callers that pass -Multi must
+        wrap the result in @() before counting it: one item comes back as one item, not
+        as a one-element array, once it has been through the pipeline.  #>
     param(
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items,
         [Parameter(Mandatory)][scriptblock]$Label,
         [int]$PageSize = 20,
-        [switch]$NoFilter
+        [switch]$NoFilter,
+        [switch]$Multi
     )
     if (-not $Items.Count) { return $null }
     if (Test-ErRawKeys) {
         try {
             return Select-ErDrawnMenu -Title $Title -Items $Items -Label $Label `
-                       -PageSize $PageSize -NoFilter:$NoFilter
+                       -PageSize $PageSize -NoFilter:$NoFilter -Multi:$Multi
         }
         catch {
             $script:ErNoRawKeys = $true
             Write-Host "`n(this host cannot draw a menu, falling back to numbers: $($_.Exception.Message))"
         }
     }
-    Select-ErNumberedMenu -Title $Title -Items $Items -Label $Label -PageSize $PageSize -NoFilter:$NoFilter
+    Select-ErNumberedMenu -Title $Title -Items $Items -Label $Label -PageSize $PageSize `
+        -NoFilter:$NoFilter -Multi:$Multi
 }
 
 function Select-ErOption {
@@ -874,6 +972,173 @@ function Assert-ErGameNotRunning {
         throw ("Elden Ring / ME3 is running ({0}). Close the game first - quitting it rewrites the save and would discard these edits." -f (($p | ForEach-Object { $_.ProcessName } | Sort-Object -Unique) -join ', '))
     }
 }
+
+# ==============================================================================
+#  Writing
+# ==============================================================================
+# One backup per session, taken lazily before the first write. A property of the run
+# rather than of a write, so it is held here rather than passed around.
+
+$script:ErBackup = $null
+
+function New-ErEdit {
+    <#  One pending four-byte change: where it goes, what has to be there now, what goes
+        there instead, and how to describe it to the person confirming it.  #>
+    param(
+        [Parameter(Mandatory)][int]$Offset,
+        [Parameter(Mandatory)][uint32]$Old,
+        [Parameter(Mandatory)][uint32]$New,
+        [Parameter(Mandatory)][string]$Label
+    )
+    [pscustomobject]@{ Offset = $Offset; Old = $Old; New = $New; Label = $Label }
+}
+
+function Invoke-ErSaveWriteBatch {
+    <#  Confirm a set of four-byte changes, back up, write them, and prove they landed.
+
+        One edit or two hundred, this is the only path that writes: a bulk edit gets the
+        same backup, the same read-back and the same checksum re-check as a single one.
+        What it does NOT do is ask once per item - a confirmation nobody reads is worse
+        than one that states the whole plan - so the plan is printed first and answered
+        once.
+
+        Everything is checked before anything is written. Each offset must still hold the
+        value the plan was built from, or nothing is written at all: a partially applied
+        bulk edit is the one outcome worth going out of the way to avoid.
+
+        Proving it means re-reading the file from disk and checking every offset AND every
+        entry checksum: a good checksum on the edited slot says nothing about whether a
+        write went where it was meant to go.
+
+        A failed verification stops the session rather than returning: continuing to edit
+        a file that did not come back as expected is how one bad write becomes five.
+
+        Returns $true if written, $false if the user declined.  #>
+    param(
+        [Parameter(Mandatory)]$Session,
+        [Parameter(Mandatory)][byte[]]$Bytes,
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][object[]]$Edits,
+        [int]$Show = 40
+    )
+    if (-not $Edits.Count) { return $false }
+
+    # Not just at startup: a REPL session lasts long enough for the game to be launched
+    # halfway through, and anything written while it runs is discarded when it quits.
+    Assert-ErGameNotRunning
+
+    # Two rows CAN be the same field: one weapon reached through two inventory records
+    # resolves to one GaItem, so ticking both is a reasonable thing for someone to do and
+    # asks for the same change twice. That collapses to one edit. Two DIFFERENT values for
+    # one field is another matter - there is no answer to which one was meant - and that
+    # refuses the whole plan.
+    $seen = @{}
+    $plan = New-Object Collections.ArrayList
+    foreach ($e in $Edits) {
+        if ($seen.ContainsKey($e.Offset)) {
+            $first = $seen[$e.Offset]
+            if ($first.Old -eq $e.Old -and $first.New -eq $e.New) { continue }
+            throw ("Two different changes target 0x{0:x} ({1} and {2}) - refusing to write. Pick one of them." -f $e.Offset, $first.New, $e.New)
+        }
+        $seen[$e.Offset] = $e
+        [void]$plan.Add($e)
+        $cur = [BitConverter]::ToUInt32($Bytes, $e.Offset)
+        if ($cur -ne $e.Old) {
+            throw ("Offset 0x{0:x} holds {1}, expected {2} - refusing to write ANY of these {3} change(s). The in-memory view no longer matches the file." -f $e.Offset, $cur, $e.Old, $Edits.Count)
+        }
+    }
+    $Edits = @($plan)
+
+    if ($Edits.Count -eq 1) { Write-Host "`n  WRITE" }
+    else                    { Write-Host ("`n  WRITE  {0} change(s)" -f $Edits.Count) }
+    $n = 0
+    foreach ($e in $Edits) {
+        if ($n -ge $Show) {
+            Write-Host ("         ... and {0} more, all part of this one confirmation" -f ($Edits.Count - $Show))
+            break
+        }
+        Write-Host ("         {0}" -f $e.Label)
+        Write-Host ("           0x{0:x}  {1} -> {2}" -f $e.Offset, $e.Old, $e.New)
+        $n++
+    }
+    $q = if ($Edits.Count -eq 1) { '  Apply this?' } else { "  Apply all $($Edits.Count)?" }
+    if (-not (Read-ErYesNo -Question $q)) {
+        Write-Host '  Left alone.'
+        return $false
+    }
+
+    if (-not $script:ErBackup) {
+        $script:ErBackup = "$($Session.SavePath).bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
+        Copy-Item -LiteralPath $Session.SavePath -Destination $script:ErBackup
+        Write-Host "  Backup -> $script:ErBackup"
+    }
+
+    # One checksum update and one file write for the whole plan: every intermediate state
+    # would be a file with a stale checksum, and none of them is worth putting on disk.
+    foreach ($e in $Edits) {
+        [Array]::Copy([BitConverter]::GetBytes($e.New), 0, $Bytes, $e.Offset, 4)
+    }
+    Update-ErChecksum -Bytes $Bytes -Entry $Entry
+    [IO.File]::WriteAllBytes($Session.SavePath, $Bytes)
+
+    $back = [IO.File]::ReadAllBytes($Session.SavePath)
+    foreach ($e in $Edits) {
+        $got = [BitConverter]::ToUInt32($back, $e.Offset)
+        if ($got -ne $e.New) {
+            throw ("VERIFY FAILED: 0x{0:x} reads {1} after writing {2}. Restore from {3}." -f $e.Offset, $got, $e.New, $script:ErBackup)
+        }
+    }
+    $entries = @(Get-ErEntries -Bytes $back)
+    $bad = @($entries | Where-Object { -not (Test-ErChecksum -Bytes $back -Entry $_) })
+    if ($bad.Count) {
+        throw ("VERIFY FAILED: bad checksum on {0}. Restore from {1}." -f (($bad | ForEach-Object { $_.Name }) -join ', '), $script:ErBackup)
+    }
+    Write-Host ("  {0} change(s) written and verified ({1} entry checksums ok)." -f $Edits.Count, $entries.Count)
+    $true
+}
+
+function Invoke-ErSaveWrite {
+    <#  One four-byte change, through the batch path so that there is exactly one way
+        this tool writes to a save.
+
+        Returns $true if written, $false if the user declined.  #>
+    param(
+        [Parameter(Mandatory)]$Session,
+        [Parameter(Mandatory)][byte[]]$Bytes,
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][int]$Offset,
+        [Parameter(Mandatory)][uint32]$Old,
+        [Parameter(Mandatory)][uint32]$New,
+        [Parameter(Mandatory)][string]$Label
+    )
+    Invoke-ErSaveWriteBatch -Session $Session -Bytes $Bytes -Entry $Entry `
+        -Edits @(New-ErEdit -Offset $Offset -Old $Old -New $New -Label $Label)
+}
+
+function Write-ErLeftAlone {
+    <#  Say what a bulk edit is not going to touch, and why, without printing two hundred
+        lines to say it. Nothing here is an error: an item that is already at the target,
+        or that this build cannot take the value, is simply not part of the plan.  #>
+    param([AllowEmptyCollection()][string[]]$Reasons, [int]$Show = 8)
+    if (-not $Reasons.Count) { return }
+    Write-Host ("  {0} left alone:" -f $Reasons.Count)
+    foreach ($r in @($Reasons | Select-Object -First $Show)) { Write-Host "    $r" }
+    if ($Reasons.Count -gt $Show) { Write-Host ("    ... and {0} more" -f ($Reasons.Count - $Show)) }
+}
+
+function Get-ErPicked {
+    <#  Normalise what the picker gave back into an array: Esc is $null, one item comes
+        back as one item rather than as a one-element array, and callers should not each
+        have to remember that.  #>
+    param($Result)
+    if ($null -eq $Result) { return @() }
+    @($Result)
+}
+
+# ==============================================================================
+#  Actions
+# ==============================================================================
+
 
 function Resolve-ErSession {
     <#  Turns the shared parameter block (-SaveFolder -Save -Path -Profile -BaseGame
